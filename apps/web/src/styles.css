@@ -99,6 +99,17 @@ nav button.active {
   letter-spacing: 0;
 }
 
+.globalStatus {
+  display: inline-flex;
+  margin-top: 10px;
+  padding: 6px 10px;
+  color: #196b50;
+  background: #e6f3eb;
+  border: 1px solid #c9e4d3;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
 .iconButton {
   width: 44px;
   height: 44px;

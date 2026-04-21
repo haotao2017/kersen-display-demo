@@ -64,6 +64,16 @@ type WsStatus = {
   remoteAddress?: string;
 };
 
+type MqttStats = {
+  mode: 'embedded' | 'external';
+  external: {
+    host?: string;
+    port: number;
+    connected: boolean;
+    clientId: string;
+  };
+};
+
 function App() {
   const [activeView, setActiveView] = React.useState<'overview' | 'stations' | 'labels' | 'cloud' | 'logs'>('overview');
   const [tokenReady, setTokenReady] = React.useState(Boolean(getToken()));
@@ -75,8 +85,11 @@ function App() {
   const [labels, setLabels] = React.useState<Label[]>([]);
   const [logs, setLogs] = React.useState<DeviceLog[]>([]);
   const [wsStatuses, setWsStatuses] = React.useState<Record<string, WsStatus>>({});
+  const [mqttStats, setMqttStats] = React.useState<MqttStats | null>(null);
   const [selectedApId, setSelectedApId] = React.useState('');
   const [rawWsCommand, setRawWsCommand] = React.useState('{\n  "type": "DEVICE_RETRIEVE"\n}');
+  const [rawCommandStatus, setRawCommandStatus] = React.useState('未发送');
+  const [sendingRawCommand, setSendingRawCommand] = React.useState(false);
   const [showAllLogs, setShowAllLogs] = React.useState(false);
   const [logsLoadedAt, setLogsLoadedAt] = React.useState<string>('-');
   const [message, setMessage] = React.useState(getToken() ? '已恢复登录状态' : '等待登录');
@@ -96,14 +109,16 @@ function App() {
   }
 
   async function refresh() {
-    const [storeResult, apsResult, labelsResult] = await Promise.all([
+    const [storeResult, apsResult, labelsResult, mqttResult] = await Promise.all([
       api<StoreConfig>(`/api/stores/${storeCode}`),
       api<BaseStation[]>('/api/base-stations'),
       api<Label[]>('/api/labels'),
+      api<MqttStats>('/api/mqtt/stats'),
     ]);
     setStore(storeResult);
     setAps(apsResult);
     setLabels(labelsResult);
+    setMqttStats(mqttResult);
     setSelectedApId((current) => current || apsResult.find((ap) => ap.status === 'online')?.id || apsResult[0]?.id || '');
     setMessage(`刷新完成：${new Date().toLocaleTimeString()}`);
   }
@@ -154,23 +169,42 @@ function App() {
   }
 
   async function sendRawWsCommand() {
+    if (!selectedApId) {
+      setRawCommandStatus('没有选择目标基站');
+      setMessage('没有选择目标基站');
+      return;
+    }
+
     let payload: Record<string, unknown>;
     try {
       payload = JSON.parse(rawWsCommand) as Record<string, unknown>;
     } catch {
+      setRawCommandStatus('JSON 格式错误');
       setMessage('原始命令不是合法 JSON');
       return;
     }
 
-    const result = await api<{ ok: boolean; reason?: string; bytes?: number }>(
-      `/api/base-stations/${encodeURIComponent(selectedApId)}/ws-command`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ payload }),
-      },
-    );
-    setMessage(result.ok ? `WS 命令已发送，${result.bytes ?? 0} bytes` : `WS 命令未发送：${result.reason ?? '未知原因'}`);
-    await Promise.all([refreshLogs(), refreshWsStatus()]);
+    setSendingRawCommand(true);
+    setRawCommandStatus('发送中...');
+    try {
+      const result = await api<{ ok: boolean; reason?: string; bytes?: number }>(
+        `/api/base-stations/${encodeURIComponent(selectedApId)}/ws-command`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ payload }),
+        },
+      );
+      const nextStatus = result.ok ? `已发送，${result.bytes ?? 0} bytes` : `未发送：${result.reason ?? '未知原因'}`;
+      setRawCommandStatus(nextStatus);
+      setMessage(result.ok ? `WS 命令已发送，${result.bytes ?? 0} bytes` : `WS 命令未发送：${result.reason ?? '未知原因'}`);
+      await Promise.all([refreshLogs(), refreshWsStatus()]);
+    } catch (error) {
+      const text = error instanceof Error ? error.message : '未知错误';
+      setRawCommandStatus(text);
+      setMessage(text);
+    } finally {
+      setSendingRawCommand(false);
+    }
   }
 
   React.useEffect(() => {
@@ -215,6 +249,7 @@ function App() {
           <div>
             <p>电子价签云平台</p>
             <h1>基站、价签与 MQTT 链路控制台</h1>
+            <span className="globalStatus">{message}</span>
           </div>
           <button className="iconButton" onClick={() => refresh()} disabled={!tokenReady} title="刷新">
             <RefreshCcw size={18} />
@@ -260,12 +295,12 @@ function App() {
                 <p className="statusLine">{message}</p>
               </div>
 
-              <CloudConfig store={store} storeCode={storeCode} />
+              <CloudConfig store={store} storeCode={storeCode} mqttStats={mqttStats} />
             </section>
           </>
         )}
 
-        {activeView === 'cloud' && <CloudConfig store={store} storeCode={storeCode} detailed />}
+        {activeView === 'cloud' && <CloudConfig store={store} storeCode={storeCode} mqttStats={mqttStats} detailed />}
 
         {activeView === 'stations' && (
           <>
@@ -299,10 +334,11 @@ function App() {
                 <label>JSON 命令
                   <textarea value={rawWsCommand} onChange={(event) => setRawWsCommand(event.target.value)} />
                 </label>
-                <button className="primary" disabled={!selectedApId} onClick={() => sendRawWsCommand().catch((error: Error) => setMessage(error.message))}>
-                  <Send size={18} /> 发送到基站 WS
+                <button className="primary" disabled={!selectedApId || sendingRawCommand} onClick={() => sendRawWsCommand()}>
+                  <Send size={18} /> {sendingRawCommand ? '发送中' : '发送到基站 WS'}
                 </button>
               </div>
+              <p className="statusLine">发送状态：{rawCommandStatus}</p>
               <p className="statusLine">这块用于逆向验证云端下发格式。发送后去“接入日志”看 `WS-OUT /ws` 和基站后续返回。</p>
             </section>
           </>
@@ -365,7 +401,7 @@ function App() {
   );
 }
 
-function CloudConfig({ store, storeCode, detailed = false }: { store: StoreConfig | null; storeCode: string; detailed?: boolean }) {
+function CloudConfig({ store, storeCode, mqttStats, detailed = false }: { store: StoreConfig | null; storeCode: string; mqttStats: MqttStats | null; detailed?: boolean }) {
   return (
     <div className="panel">
       <h2>基站填写参数</h2>
@@ -376,6 +412,8 @@ function CloudConfig({ store, storeCode, detailed = false }: { store: StoreConfi
         <dt>密码</dt><dd>admin123456</dd>
         <dt>MQTT TCP</dt><dd>{store?.mqttTcpPort ?? 1883}</dd>
         <dt>MQTT WebSocket</dt><dd>ws://服务器IP:4001{store?.mqttWsPath ?? '/mqtt'}</dd>
+        <dt>MQTT 模式</dt><dd>{mqttStats?.mode === 'external' ? '外部 EMQX' : '内置本地 Broker'}</dd>
+        <dt>EMQX 状态</dt><dd>{mqttStats?.mode === 'external' ? `${mqttStats.external.host}:${mqttStats.external.port} · ${mqttStats.external.connected ? '已连接' : '未连接'}` : '未启用外部 EMQX'}</dd>
       </dl>
       {detailed && (
         <div className="notice">

@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { loadEnvFiles } from './shared/load-env';
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { NextFunction, Request, Response } from 'express';
@@ -6,6 +7,8 @@ import { AppModule } from './app.module';
 import { ApWebsocketService } from './modules/ap-websocket/ap-websocket.service';
 import { MqttService } from './modules/mqtt/mqtt.service';
 import { MemoryStore } from './shared/memory-store';
+
+loadEnvFiles();
 
 function isLoopback(ip?: string) {
   return !ip || ip === '::1' || ip === '127.0.0.1' || ip === '::ffff:127.0.0.1';
