@@ -34,6 +34,10 @@ class RawWsCommandDto {
   payload!: Record<string, unknown>;
 }
 
+function offlineAfterMs() {
+  return Number(process.env.AP_OFFLINE_AFTER_SECONDS ?? 90) * 1000;
+}
+
 @Controller('api/base-stations')
 export class BaseStationsController {
   constructor(
@@ -44,7 +48,17 @@ export class BaseStationsController {
   @UseGuards(AuthGuard)
   @Get()
   list() {
-    return [...this.db.baseStations.values()];
+    return [...this.db.baseStations.values()].map((ap) => {
+      const lastSeenAt = ap.lastSeenAt ? new Date(ap.lastSeenAt).getTime() : 0;
+      const stale = !lastSeenAt || Date.now() - lastSeenAt > offlineAfterMs();
+      if (!stale) {
+        return ap;
+      }
+      return {
+        ...ap,
+        status: 'offline' as const,
+      };
+    });
   }
 
   @Post('register')

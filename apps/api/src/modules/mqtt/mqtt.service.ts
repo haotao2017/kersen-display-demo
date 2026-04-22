@@ -109,11 +109,16 @@ export class MqttService implements OnModuleDestroy {
     command.status = 'sent';
     command.sentAt = new Date().toISOString();
     this.db.commands.set(command.id, command);
+    this.db.save();
   }
 
-  private async publish(topic: string, payload: string) {
+  async publishJson(topic: string, payload: unknown, options: { retain?: boolean } = {}) {
+    await this.publish(topic, JSON.stringify(payload), options);
+  }
+
+  private async publish(topic: string, payload: string, options: { retain?: boolean } = {}) {
     if (this.mode() === 'external') {
-      await this.publishExternal(topic, payload);
+      await this.publishExternal(topic, payload, options);
       return;
     }
 
@@ -122,7 +127,7 @@ export class MqttService implements OnModuleDestroy {
     }
 
     await new Promise<void>((resolve, reject) => {
-      this.broker?.publish({ cmd: 'publish', topic, payload: Buffer.from(payload), qos: 1, retain: false, dup: false }, (error) => {
+      this.broker?.publish({ cmd: 'publish', topic, payload: Buffer.from(payload), qos: 1, retain: Boolean(options.retain), dup: false }, (error) => {
         if (error) {
           reject(error);
           return;
@@ -286,7 +291,7 @@ export class MqttService implements OnModuleDestroy {
     this.externalPingTimer = undefined;
   }
 
-  private async publishExternal(topic: string, payload: string) {
+  private async publishExternal(topic: string, payload: string, options: { retain?: boolean } = {}) {
     await this.connectExternal();
     if (!this.externalSocket || !this.externalConnected) {
       throw new Error('EMQX is not connected');
@@ -297,7 +302,7 @@ export class MqttService implements OnModuleDestroy {
       topic,
       payload: Buffer.from(payload),
       qos: 0,
-      retain: false,
+      retain: Boolean(options.retain),
       dup: false,
     }));
   }

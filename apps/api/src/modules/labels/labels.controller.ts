@@ -5,6 +5,7 @@ import { AuthGuard } from '../../shared/auth.guard';
 import { MemoryStore } from '../../shared/memory-store';
 import { Label } from '../../shared/models';
 import { ApWebsocketService } from '../ap-websocket/ap-websocket.service';
+import { LabelRendererService } from './label-renderer.service';
 
 class UpsertLabelDto {
   @IsString()
@@ -50,6 +51,7 @@ export class LabelsController {
     private readonly db: MemoryStore,
     private readonly mqtt: MqttService,
     private readonly apWebsocket: ApWebsocketService,
+    private readonly renderer: LabelRendererService,
   ) {}
 
   @Get()
@@ -76,24 +78,47 @@ export class LabelsController {
     return label;
   }
 
+  @Get(':id/render')
+  render(@Param('id') id: string) {
+    return this.renderer.render(this.db.labels.get(id));
+  }
+
   @Post(':id/commands')
   async command(@Param('id') id: string, @Body() dto: CommandDto) {
+    const label = this.db.labels.get(id);
+    const render = label ? this.renderer.render(label) : undefined;
+    const payload = dto.type === 'refresh_label' && render
+      ? {
+        ...dto.payload,
+        image: {
+          labelId: id,
+          width: render.width,
+          height: render.height,
+          colors: render.colors,
+          preview_svg_b64: render.preview.svg_b64,
+          bitmap_format: render.bitmap.format,
+          bitmap_b64: render.bitmap.bitmap_b64,
+          rowBytes: render.bitmap.rowBytes,
+          blackBit: render.bitmap.blackBit,
+        },
+      }
+      : dto.payload;
+
     const command = this.db.createCommand({
       storeCode: dto.storeCode,
       targetType: 'label',
       targetId: id,
       type: dto.type,
-      payload: dto.payload,
+      payload,
     });
 
-    const label = this.db.labels.get(id);
     const apId = label?.apId ?? [...this.db.baseStations.values()].find((item) => item.status === 'online')?.id;
     const wsPayload = dto.type === 'raw' ? dto.payload : {
       type: 'LABEL_COMMAND',
       command_id: command.id,
       label_id: id,
       command_type: dto.type,
-      payload: dto.payload,
+      payload,
     };
 
     const wsResult = apId ? this.apWebsocket.sendRaw(apId, wsPayload) : { ok: false, reason: 'No online AP found' };
@@ -102,10 +127,27 @@ export class LabelsController {
       command.sentAt = new Date().toISOString();
       this.db.commands.set(command.id, command);
       this.db.save();
-      return { ...command, transport: 'websocket', delivery: wsResult };
+      return {
+        ...command,
+        transport: 'websocket',
+        delivery: wsResult,
+        execution: {
+          confirmed: false,
+          reason: 'AP accepted the WebSocket frame, but no screen-refresh ACK was observed.',
+        },
+      };
     }
 
     await this.mqtt.publishLabelCommand(command);
-    return command;
+    return {
+      ...command,
+      transport: 'mqtt',
+      delivery: wsResult,
+      mqtt: { ok: true },
+      execution: {
+        confirmed: false,
+        reason: 'Command was published to MQTT because the AP WebSocket was unavailable or stale.',
+      },
+    };
   }
 }

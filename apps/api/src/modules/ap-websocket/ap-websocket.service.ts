@@ -3,6 +3,7 @@ import { Server as HttpServer } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { MemoryStore } from '../../shared/memory-store';
 import { BaseStation, Label } from '../../shared/models';
+import { MqttService } from '../mqtt/mqtt.service';
 
 function decodeToken(token: string) {
   try {
@@ -75,6 +76,10 @@ function normalizeMac(value?: string) {
   return hex.match(/.{1,2}/g)?.join(':');
 }
 
+function offlineAfterMs() {
+  return Number(process.env.AP_OFFLINE_AFTER_SECONDS ?? 90) * 1000;
+}
+
 @Injectable()
 export class ApWebsocketService {
   private readonly logger = new Logger(ApWebsocketService.name);
@@ -82,7 +87,10 @@ export class ApWebsocketService {
   private readonly activeSockets = new Map<string, WebSocket>();
   private readonly socketContexts = new WeakMap<WebSocket, ApSocketContext>();
 
-  constructor(private readonly db: MemoryStore) {}
+  constructor(
+    private readonly db: MemoryStore,
+    private readonly mqtt: MqttService,
+  ) {}
 
   attach(server: HttpServer) {
     if (this.attached) {
@@ -148,6 +156,7 @@ export class ApWebsocketService {
         if (latestContext) {
           latestContext.lastMessageAt = new Date().toISOString();
         }
+        void this.bridgeUplinkToMqtt(text, ws);
         this.db.recordRequest({
           method: 'WS',
           path: request.url ?? '/api/websocket/connect',
@@ -185,9 +194,11 @@ export class ApWebsocketService {
   getConnectionStatus(apId: string) {
     const ws = this.activeSockets.get(apId);
     const context = ws ? this.socketContexts.get(ws) : undefined;
+    const activityTime = context?.lastMessageAt ?? context?.connectedAt;
+    const activeRecently = activityTime ? Date.now() - new Date(activityTime).getTime() <= offlineAfterMs() : false;
     return {
       apId,
-      connected: Boolean(ws && ws.readyState === WebSocket.OPEN),
+      connected: Boolean(ws && ws.readyState === WebSocket.OPEN && activeRecently),
       connectedAt: context?.connectedAt,
       lastMessageAt: context?.lastMessageAt,
       remoteAddress: context?.remoteAddress,
@@ -195,6 +206,14 @@ export class ApWebsocketService {
   }
 
   sendRaw(apId: string, payload: unknown) {
+    const status = this.getConnectionStatus(apId);
+    if (!status.connected) {
+      return {
+        ok: false,
+        reason: 'AP websocket is stale or not connected',
+      };
+    }
+
     const ws = this.activeSockets.get(apId);
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       return {
@@ -215,6 +234,8 @@ export class ApWebsocketService {
       ok: true,
       bytes: Buffer.byteLength(text),
       text,
+      execution: 'unconfirmed',
+      message: 'WebSocket frame sent; waiting for a device execution ACK from the AP firmware.',
     };
   }
 
@@ -248,6 +269,66 @@ export class ApWebsocketService {
     if (parsed.type === 'SLAVE_ADV_SVC') {
       this.applySlaveAdv(parsed as SlaveAdvSvcMessage);
     }
+  }
+
+  private async bridgeUplinkToMqtt(text: string, ws: WebSocket) {
+    if (text === 'ping') {
+      return;
+    }
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+
+    const context = this.socketContexts.get(ws);
+    const type = typeof parsed.type === 'string' ? parsed.type : 'UNKNOWN';
+    const apId = this.pickApId(parsed, context);
+    const storeCode = this.pickStoreCode(parsed, context);
+    const envelope = {
+      direction: 'ap_to_cloud',
+      receivedAt: new Date().toISOString(),
+      apId,
+      storeCode,
+      type,
+      payload: parsed,
+    };
+
+    try {
+      await this.mqtt.publishJson(`stores/${storeCode}/aps/${apId}/uplink`, envelope, { retain: true });
+      await this.mqtt.publishJson(`stores/${storeCode}/aps/${apId}/events/${type}`, envelope, { retain: true });
+
+      if (type === 'DEVICE_RETRIEVE' && parsed.data && typeof parsed.data === 'object') {
+        for (const [labelId, payload] of Object.entries(parsed.data as Record<string, unknown>)) {
+          await this.mqtt.publishJson(`stores/${storeCode}/labels/${labelId}/events`, {
+            ...envelope,
+            labelId,
+            payload,
+          }, { retain: true });
+        }
+      }
+
+      if (type === 'SLAVE_ADV_SVC' && typeof parsed.addr === 'string') {
+        const labelId = parsed.addr.slice(0, 8);
+        await this.mqtt.publishJson(`stores/${storeCode}/labels/${labelId}/events`, {
+          ...envelope,
+          labelId,
+        }, { retain: true });
+      }
+    } catch (error) {
+      this.logger.warn(`Failed to bridge AP uplink to MQTT: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private pickStoreCode(parsed: Record<string, unknown>, context?: ApSocketContext) {
+    return String(parsed.store_code ?? context?.storeCode ?? process.env.UPSTREAM_STORE_CODE ?? '20248517');
+  }
+
+  private pickApId(parsed: Record<string, unknown>, context?: ApSocketContext) {
+    const raw = parsed.ap_code ?? parsed.mac ?? context?.apId ?? [...this.db.baseStations.values()].find((item) => item.status === 'online')?.id;
+    return normalizeMac(String(raw ?? 'unknown-ap')) ?? 'unknown-ap';
   }
 
   private applyApOnline(message: ApOnlineMessage, ws: WebSocket, remoteAddress?: string) {

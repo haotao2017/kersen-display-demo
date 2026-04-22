@@ -74,6 +74,41 @@ type MqttStats = {
   };
 };
 
+type LabelCommandResult = {
+  id: string;
+  status: string;
+  transport?: 'websocket' | 'mqtt';
+  delivery?: {
+    ok?: boolean;
+    reason?: string;
+    bytes?: number;
+    execution?: string;
+  };
+  mqtt?: {
+    ok?: boolean;
+    reason?: string;
+  };
+  execution?: {
+    confirmed: boolean;
+    reason: string;
+  };
+};
+
+type LabelRender = {
+  labelId: string;
+  width: number;
+  height: number;
+  colors: string[];
+  preview: {
+    dataUri: string;
+  };
+  bitmap: {
+    format: string;
+    bytes: number;
+    bitmap_b64: string;
+  };
+};
+
 function App() {
   const [activeView, setActiveView] = React.useState<'overview' | 'stations' | 'labels' | 'cloud' | 'logs'>('overview');
   const [tokenReady, setTokenReady] = React.useState(Boolean(getToken()));
@@ -84,12 +119,15 @@ function App() {
   const [aps, setAps] = React.useState<BaseStation[]>([]);
   const [labels, setLabels] = React.useState<Label[]>([]);
   const [logs, setLogs] = React.useState<DeviceLog[]>([]);
+  const [labelRenders, setLabelRenders] = React.useState<Record<string, LabelRender>>({});
   const [wsStatuses, setWsStatuses] = React.useState<Record<string, WsStatus>>({});
   const [mqttStats, setMqttStats] = React.useState<MqttStats | null>(null);
   const [selectedApId, setSelectedApId] = React.useState('');
   const [rawWsCommand, setRawWsCommand] = React.useState('{\n  "type": "DEVICE_RETRIEVE"\n}');
   const [rawCommandStatus, setRawCommandStatus] = React.useState('未发送');
   const [sendingRawCommand, setSendingRawCommand] = React.useState(false);
+  const [labelCommandStatus, setLabelCommandStatus] = React.useState<Record<string, string>>({});
+  const [sendingLabels, setSendingLabels] = React.useState<Record<string, boolean>>({});
   const [showAllLogs, setShowAllLogs] = React.useState(false);
   const [logsLoadedAt, setLogsLoadedAt] = React.useState<string>('-');
   const [message, setMessage] = React.useState(getToken() ? '已恢复登录状态' : '等待登录');
@@ -121,6 +159,19 @@ function App() {
     setMqttStats(mqttResult);
     setSelectedApId((current) => current || apsResult.find((ap) => ap.status === 'online')?.id || apsResult[0]?.id || '');
     setMessage(`刷新完成：${new Date().toLocaleTimeString()}`);
+    void refreshLabelRenders(labelsResult);
+  }
+
+  async function refreshLabelRenders(nextLabels = labels) {
+    const results = await Promise.allSettled(
+      nextLabels.map(async (label) => api<LabelRender>(`/api/labels/${encodeURIComponent(label.id)}/render`)),
+    );
+    const rendered = Object.fromEntries(
+      results
+        .filter((result): result is PromiseFulfilledResult<LabelRender> => result.status === 'fulfilled')
+        .map((result) => [result.value.labelId, result.value]),
+    );
+    setLabelRenders(rendered);
   }
 
   async function refreshWsStatus(apIds = aps.map((ap) => ap.id)) {
@@ -153,19 +204,36 @@ function App() {
   }
 
   async function publish(label: Label) {
-    const result = await api<{ transport?: string; delivery?: { ok?: boolean; reason?: string } }>(`/api/labels/${label.id}/commands`, {
-      method: 'POST',
-      body: JSON.stringify({
-        storeCode: label.storeCode,
-        type: 'refresh_label',
-        payload: {
-          title: label.title,
-          price: label.price,
-          currency: label.currency,
-        },
-      }),
-    });
-    setMessage(result?.delivery?.ok ? `已通过 WebSocket 下发：${label.id}` : `已排队下发：${label.id}`);
+    setSendingLabels((current) => ({ ...current, [label.id]: true }));
+    setLabelCommandStatus((current) => ({ ...current, [label.id]: '下发中...' }));
+    setMessage(`正在下发：${label.id}`);
+
+    try {
+      const result = await api<LabelCommandResult>(`/api/labels/${label.id}/commands`, {
+        method: 'POST',
+        body: JSON.stringify({
+          storeCode: label.storeCode,
+          type: 'refresh_label',
+          payload: {
+            title: label.title,
+            price: label.price,
+            currency: label.currency,
+          },
+        }),
+      });
+      const statusText = result.transport === 'websocket'
+        ? `图像已送达基站连接，${result.delivery?.bytes ?? 0} bytes；未收到刷屏确认`
+        : `图像已发布到 EMQX：${result.status}`;
+      setLabelCommandStatus((current) => ({ ...current, [label.id]: statusText }));
+      setMessage(`${label.id}：${statusText}${result.execution?.reason ? `。${result.execution.reason}` : ''}`);
+      await Promise.all([refreshLogs(), refresh()]);
+    } catch (error) {
+      const text = error instanceof Error ? error.message : '未知错误';
+      setLabelCommandStatus((current) => ({ ...current, [label.id]: text }));
+      setMessage(`${label.id} 下发失败：${text}`);
+    } finally {
+      setSendingLabels((current) => ({ ...current, [label.id]: false }));
+    }
   }
 
   async function sendRawWsCommand() {
@@ -358,13 +426,24 @@ function App() {
             <div className="labelGrid">
               {labels.map((label) => (
                 <article className="labelCard" key={label.id}>
+                  {labelRenders[label.id] && (
+                    <img
+                      className="labelPreview"
+                      src={labelRenders[label.id].preview.dataUri}
+                      alt={`${label.id} preview`}
+                    />
+                  )}
                   <span>{label.sku ?? label.id}</span>
                   <h3>{label.title}</h3>
                   <strong>{label.currency} {label.price.toFixed(2)}</strong>
-                  <p>{label.status} · 电量 {label.battery ?? '-'}% · RSSI {label.rssi ?? '-'}</p>
-                  <button onClick={() => publish(label).catch((error: Error) => setMessage(error.message))}>
-                    <Send size={16} /> 下发
+                  <p>
+                    {label.status} · 电量 {label.battery ?? '-'}% · RSSI {label.rssi ?? '-'}
+                    {labelRenders[label.id] ? ` · ${labelRenders[label.id].width}x${labelRenders[label.id].height} · ${labelRenders[label.id].bitmap.format}` : ''}
+                  </p>
+                  <button disabled={Boolean(sendingLabels[label.id])} onClick={() => publish(label)}>
+                    <Send size={16} /> {sendingLabels[label.id] ? '下发中' : '下发'}
                   </button>
+                  <small>{labelCommandStatus[label.id] ?? '未下发'}</small>
                 </article>
               ))}
             </div>

@@ -333,14 +333,31 @@ textarea {
 }
 
 .labelCard {
-  min-height: 190px;
+  min-height: 320px;
   padding: 18px;
   display: grid;
 }
 
+.labelPreview {
+  width: 100%;
+  aspect-ratio: 296 / 128;
+  object-fit: contain;
+  background: #f8faf8;
+  border: 1px solid #dfe8e2;
+  border-radius: 6px;
+}
+
 .labelCard span,
-.labelCard p {
+.labelCard p,
+.labelCard small {
   color: #697a71;
+}
+
+.labelCard small {
+  min-height: 18px;
+  display: block;
+  margin-top: 8px;
+  word-break: break-word;
 }
 
 .labelCard h3 {
