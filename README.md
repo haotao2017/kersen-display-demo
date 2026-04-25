@@ -9,6 +9,7 @@
 - MQTT：支持内置 broker，也支持连接外部 EMQX。
 - 价签渲染：后端生成 SVG 预览和 1bpp 黑白位图，下发命令会携带 `image.bitmap_b64`。
 - 逆向记录：见 [docs/reverse-notes.md](docs/reverse-notes.md)。
+- 图片全屏下发协议：见 [docs/image-downlink-service0c.md](docs/image-downlink-service0c.md)。
 - AWS 部署草案：见 [docs/aws-deploy.md](docs/aws-deploy.md)。
 
 ## 本地运行

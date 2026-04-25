@@ -7,6 +7,7 @@ import { LabelsModule } from './modules/labels/labels.module';
 import { MqttModule } from './modules/mqtt/mqtt.module';
 import { StoresModule } from './modules/stores/stores.module';
 import { DeviceLogsModule } from './modules/device-logs/device-logs.module';
+import { OfficialApiModule } from './modules/official-api/official-api.module';
 import { ApWebsocketModule } from './modules/ap-websocket/ap-websocket.module';
 import { SharedModule } from './shared/shared.module';
 
@@ -23,6 +24,7 @@ import { SharedModule } from './shared/shared.module';
     BaseStationsModule,
     LabelsModule,
     DeviceLogsModule,
+    OfficialApiModule,
     ApWebsocketModule,
     MqttModule,
   ],

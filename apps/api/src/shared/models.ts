@@ -73,3 +73,22 @@ export interface RequestLog {
   body?: unknown;
   query?: unknown;
 }
+
+export interface OfficialDownlinkCapture {
+  id: string;
+  apId: string;
+  storeCode?: string;
+  targetUrl: string;
+  createdAt: string;
+  kind: 'text' | 'binary';
+  bytes: number;
+  replayable: boolean;
+  text?: string;
+  base64?: string;
+  hexPrefix?: string;
+  commandType?: string;
+  labelId?: string;
+  queueId?: number;
+  fingerprint: string;
+  summary: Record<string, unknown>;
+}

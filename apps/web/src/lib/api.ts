@@ -17,11 +17,12 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     url.searchParams.set('_ts', Date.now().toString());
   }
 
+  const isFormData = typeof FormData !== 'undefined' && init.body instanceof FormData;
   const response = await fetch(url.toString(), {
     ...init,
     cache: 'no-store',
     headers: {
-      'Content-Type': 'application/json',
+      ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
       'Cache-Control': 'no-cache',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...init.headers,

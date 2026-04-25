@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { deflateSync, gzipSync } from 'node:zlib';
 import { Label } from '../../shared/models';
 
 const WIDTH = 296;
@@ -99,6 +100,91 @@ function drawText(buffer: Uint8Array, text: string, x: number, y: number, scale:
   }
 }
 
+function isBlackPixel(bitmap: Uint8Array, x: number, y: number) {
+  const rowBytes = Math.ceil(WIDTH / 8);
+  const byteIndex = y * rowBytes + Math.floor(x / 8);
+  const bitIndex = 7 - (x % 8);
+  return (bitmap[byteIndex] & (1 << bitIndex)) !== 0;
+}
+
+function bitmapToBgra(bitmap: Uint8Array) {
+  const bytes = new Uint8Array(WIDTH * HEIGHT * 4);
+  let offset = 0;
+  for (let y = 0; y < HEIGHT; y += 1) {
+    for (let x = 0; x < WIDTH; x += 1) {
+      const color = isBlackPixel(bitmap, x, y) ? 0 : 255;
+      bytes[offset] = color;
+      bytes[offset + 1] = color;
+      bytes[offset + 2] = color;
+      bytes[offset + 3] = 255;
+      offset += 4;
+    }
+  }
+  return bytes;
+}
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) {
+      c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes: Buffer) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Buffer) {
+  const typeBuffer = Buffer.from(type, 'ascii');
+  const length = Buffer.alloc(4);
+  const crc = Buffer.alloc(4);
+  length.writeUInt32BE(data.length, 0);
+  crc.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])), 0);
+  return Buffer.concat([length, typeBuffer, data, crc]);
+}
+
+function bitmapToPng(bitmap: Uint8Array) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(WIDTH, 0);
+  ihdr.writeUInt32BE(HEIGHT, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // RGBA
+  ihdr[10] = 0; // compression
+  ihdr[11] = 0; // filter
+  ihdr[12] = 0; // interlace
+
+  const raw = Buffer.alloc((WIDTH * 4 + 1) * HEIGHT);
+  let offset = 0;
+  for (let y = 0; y < HEIGHT; y += 1) {
+    raw[offset] = 0;
+    offset += 1;
+    for (let x = 0; x < WIDTH; x += 1) {
+      const color = isBlackPixel(bitmap, x, y) ? 0 : 255;
+      raw[offset] = color;
+      raw[offset + 1] = color;
+      raw[offset + 2] = color;
+      raw[offset + 3] = 255;
+      offset += 4;
+    }
+  }
+
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', deflateSync(raw)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
 function makeBarcode(labelId: string) {
   return [...labelId].map((char, index) => {
     const code = char.charCodeAt(0) + index;
@@ -120,6 +206,10 @@ export class LabelRendererService {
     const price = formatPrice(label);
     const svg = this.renderSvg(label, title, price);
     const bitmap = this.renderBitmap(label, title, price);
+    const bitmapBytes = Buffer.from(bitmap.bitmap_b64, 'base64');
+    const png = bitmapToPng(bitmapBytes);
+    const bgra = bitmapToBgra(bitmapBytes);
+    const bgraGzip = gzipSync(bgra);
 
     return {
       labelId: label.id,
@@ -133,6 +223,29 @@ export class LabelRendererService {
         dataUri: `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`,
       },
       bitmap,
+      png: {
+        mime: 'image/png',
+        format: 'png',
+        width: WIDTH,
+        height: HEIGHT,
+        bytes: png.length,
+        png_b64: png.toString('base64'),
+        dataUri: `data:image/png;base64,${png.toString('base64')}`,
+      },
+      bgra: {
+        format: 'bgra',
+        width: WIDTH,
+        height: HEIGHT,
+        bytes: bgra.length,
+        bgra_b64: Buffer.from(bgra).toString('base64'),
+      },
+      bgraGzip: {
+        format: 'bgra-gzip',
+        width: WIDTH,
+        height: HEIGHT,
+        bytes: bgraGzip.length,
+        bgra_gzip_b64: bgraGzip.toString('base64'),
+      },
     };
   }
 

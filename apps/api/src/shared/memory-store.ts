@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import * as bcrypt from 'bcryptjs';
-import { BaseStation, EslCommand, Label, RequestLog, StoreConfig } from './models';
+import { BaseStation, EslCommand, Label, OfficialDownlinkCapture, RequestLog, StoreConfig } from './models';
 
 const now = () => new Date().toISOString();
 const id = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -15,7 +15,9 @@ export class MemoryStore {
   readonly labels = new Map<string, Label>();
   readonly commands = new Map<string, EslCommand>();
   readonly requestLogs: RequestLog[] = [];
-  readonly apSessions = new Map<string, { storeCode: string; apId: string; createdAt: string }>();
+  readonly officialDownlinkCaptures: OfficialDownlinkCapture[] = [];
+  readonly apSessions = new Map<string, { storeCode: string; apId: string; createdAt: string; source: 'local' | 'official' }>();
+  readonly latestApSessions = new Map<string, { token: string; storeCode: string; apId: string; createdAt: string; source: 'local' | 'official' }>();
 
   constructor() {
     if (this.load()) {
@@ -89,8 +91,10 @@ export class MemoryStore {
     return log;
   }
 
-  registerApSession(token: string, storeCode: string, apId: string) {
-    this.apSessions.set(token, { storeCode, apId, createdAt: now() });
+  registerApSession(token: string, storeCode: string, apId: string, source: 'local' | 'official' = 'local') {
+    const session = { storeCode, apId, createdAt: now(), source };
+    this.apSessions.set(token, session);
+    this.latestApSessions.set(apId, { ...session, token });
   }
 
   save() {
@@ -104,6 +108,7 @@ export class MemoryStore {
           labels: [...this.labels.values()],
           commands: [...this.commands.values()],
           requestLogs: this.requestLogs,
+          officialDownlinkCaptures: this.officialDownlinkCaptures,
         },
         null,
         2,
@@ -122,6 +127,7 @@ export class MemoryStore {
       labels?: Label[];
       commands?: EslCommand[];
       requestLogs?: RequestLog[];
+      officialDownlinkCaptures?: OfficialDownlinkCapture[];
     };
 
     data.stores?.forEach((item) => this.stores.set(item.code, item));
@@ -129,6 +135,7 @@ export class MemoryStore {
     data.labels?.forEach((item) => this.labels.set(item.id, item));
     data.commands?.forEach((item) => this.commands.set(item.id, item));
     this.requestLogs.push(...(data.requestLogs ?? []));
+    this.officialDownlinkCaptures.push(...(data.officialDownlinkCaptures ?? []));
     return true;
   }
 }

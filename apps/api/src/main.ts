@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { loadEnvFiles } from './shared/load-env';
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { NextFunction, Request, Response } from 'express';
+import { json, NextFunction, Request, Response, urlencoded } from 'express';
 import { AppModule } from './app.module';
 import { ApWebsocketService } from './modules/ap-websocket/ap-websocket.service';
 import { MqttService } from './modules/mqtt/mqtt.service';
@@ -28,13 +28,16 @@ function isConsoleNoise(path: string, ip?: string, userAgent?: string | string[]
 }
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { bodyParser: false });
   const corsOrigin = process.env.CORS_ORIGIN ?? 'http://localhost:5173';
+  const bodyLimit = process.env.API_BODY_LIMIT ?? '25mb';
 
   app.enableCors({
     origin: corsOrigin.split(',').map((origin) => origin.trim()),
     credentials: true,
   });
+  app.use(json({ limit: bodyLimit }));
+  app.use(urlencoded({ extended: true, limit: bodyLimit }));
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -79,12 +82,15 @@ async function bootstrap() {
   });
 
   const mqtt = app.get(MqttService);
+  const apWebsocket = app.get(ApWebsocketService);
+  mqtt.onExternalPublish(({ topic, parsed }) => {
+    apWebsocket.forwardMqttCommand(topic, parsed);
+  });
   await mqtt.start();
 
   const port = Number(process.env.API_PORT ?? 4000);
   await app.listen(port);
 
-  const apWebsocket = app.get(ApWebsocketService);
   apWebsocket.attach(app.getHttpServer());
 }
 

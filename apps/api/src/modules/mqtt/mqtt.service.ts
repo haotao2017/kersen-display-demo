@@ -10,6 +10,7 @@ import { EslCommand } from '../../shared/models';
 import { loadEnvFiles } from '../../shared/load-env';
 
 type MqttMode = 'embedded' | 'external';
+type ExternalPublishHandler = (message: { topic: string; payload: string; parsed: unknown }) => void | Promise<void>;
 
 @Injectable()
 export class MqttService implements OnModuleDestroy {
@@ -21,7 +22,9 @@ export class MqttService implements OnModuleDestroy {
   private externalConnected = false;
   private externalConnecting?: Promise<void>;
   private externalPingTimer?: ReturnType<typeof setInterval>;
+  private externalPacketId = 1;
   private readonly clients = new Map<string, { connectedAt: string; username?: string }>();
+  private readonly externalPublishHandlers = new Set<ExternalPublishHandler>();
 
   constructor(private readonly db: MemoryStore) {}
 
@@ -29,7 +32,11 @@ export class MqttService implements OnModuleDestroy {
     loadEnvFiles();
 
     if (this.mode() === 'external') {
-      await this.connectExternal();
+      try {
+        await this.connectExternal();
+      } catch (error) {
+        this.logger.warn(`EMQX initial connection failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
       return;
     }
 
@@ -116,7 +123,20 @@ export class MqttService implements OnModuleDestroy {
     await this.publish(topic, JSON.stringify(payload), options);
   }
 
+  async publishBinary(topic: string, payload: Buffer | Uint8Array, options: { retain?: boolean; qos?: 0 | 1 } = {}) {
+    await this.publishBuffer(topic, Buffer.from(payload), options);
+  }
+
+  onExternalPublish(handler: ExternalPublishHandler) {
+    this.externalPublishHandlers.add(handler);
+    return () => this.externalPublishHandlers.delete(handler);
+  }
+
   private async publish(topic: string, payload: string, options: { retain?: boolean } = {}) {
+    await this.publishBuffer(topic, Buffer.from(payload), options);
+  }
+
+  private async publishBuffer(topic: string, payload: Buffer, options: { retain?: boolean; qos?: 0 | 1 } = {}) {
     if (this.mode() === 'external') {
       await this.publishExternal(topic, payload, options);
       return;
@@ -127,7 +147,7 @@ export class MqttService implements OnModuleDestroy {
     }
 
     await new Promise<void>((resolve, reject) => {
-      this.broker?.publish({ cmd: 'publish', topic, payload: Buffer.from(payload), qos: 1, retain: Boolean(options.retain), dup: false }, (error) => {
+      this.broker?.publish({ cmd: 'publish', topic, payload, qos: options.qos ?? 1, retain: Boolean(options.retain), dup: false }, (error) => {
         if (error) {
           reject(error);
           return;
@@ -222,6 +242,7 @@ export class MqttService implements OnModuleDestroy {
           this.externalSocket = socket;
           this.externalConnected = true;
           this.startExternalPing();
+          this.subscribeExternal(['#']);
           this.logger.log(`Connected to EMQX ${host}:${port} as ${clientId}${tls ? ' over TLS' : ''}`);
           resolve();
           return;
@@ -291,26 +312,69 @@ export class MqttService implements OnModuleDestroy {
     this.externalPingTimer = undefined;
   }
 
-  private async publishExternal(topic: string, payload: string, options: { retain?: boolean } = {}) {
+  private async publishExternal(topic: string, payload: Buffer, options: { retain?: boolean; qos?: 0 | 1 } = {}) {
     await this.connectExternal();
     if (!this.externalSocket || !this.externalConnected) {
       throw new Error('EMQX is not connected');
     }
 
+    const qos = options.qos ?? 0;
     this.externalSocket.write(generate({
       cmd: 'publish',
       topic,
-      payload: Buffer.from(payload),
-      qos: 0,
+      payload,
+      qos,
+      messageId: qos > 0 ? this.nextExternalPacketId() : undefined,
       retain: Boolean(options.retain),
       dup: false,
     }));
   }
 
+  private subscribeExternal(topics: string[]) {
+    if (!this.externalSocket || !this.externalConnected) {
+      return;
+    }
+
+    const messageId = this.nextExternalPacketId();
+    this.externalSocket.write(generate({
+      cmd: 'subscribe',
+      messageId,
+      subscriptions: topics.map((topic) => ({ topic, qos: 0 })),
+    }));
+    this.logger.log(`Subscribed to EMQX topics: ${topics.join(', ')}`);
+  }
+
+  private nextExternalPacketId() {
+    this.externalPacketId = this.externalPacketId >= 65535 ? 1 : this.externalPacketId + 1;
+    return this.externalPacketId;
+  }
+
   private handleExternalPublish(topic: string, payload: string) {
+    const parsed = this.parseMqttPayload(payload);
+    if (!topic.startsWith('$SYS')) {
+      this.db.recordRequest({
+        method: 'MQTT-IN',
+        path: topic,
+        statusCode: 200,
+        body: parsed,
+      });
+    }
+    for (const handler of this.externalPublishHandlers) {
+      Promise.resolve(handler({ topic, payload, parsed })).catch((error) => {
+        this.logger.warn(`External MQTT handler failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
     this.handlePublish({ cmd: 'publish', topic, payload: Buffer.from(payload), qos: 0, retain: false, dup: false } as AedesPublishPacket, {
       id: 'emqx-bridge',
     } as Client);
+  }
+
+  private parseMqttPayload(payload: string) {
+    try {
+      return JSON.parse(payload);
+    } catch {
+      return { text: payload };
+    }
   }
 
   async onModuleDestroy() {
