@@ -730,6 +730,62 @@ const LABEL_SIZE_OPTIONS = [
   { value: '10.2', label: '10.2 英寸' },
 ] as const;
 
+const CANVAS_SIZE_PRESETS = [
+  { value: '800x480', label: '800x480（7.5/大屏）' },
+  { value: '200x160', label: '200x160（1.54 候选）' },
+  { value: '200x200', label: '200x200（1.54/方屏）' },
+  { value: '152x152', label: '152x152（1.54 方屏候选）' },
+  { value: '250x122', label: '250x122（2.13 候选）' },
+  { value: '250x122@32x125', label: '250x122 stride32 total4000（重叠排查）' },
+  { value: '250x125@32x125', label: '250x125 stride32 total4000' },
+  { value: '250x128@32x128', label: '250x128 stride32 total4096' },
+  { value: '256x122@32x125', label: '256x122 stride32 total4000' },
+  { value: '256x125', label: '256x125 total4000' },
+  { value: '256x128', label: '256x128 total4096' },
+  { value: '212x104', label: '212x104（2.13 候选）' },
+  { value: '296x128', label: '296x128（2.9 常见）' },
+  { value: '296x152', label: '296x152（2.9/2.66 候选）' },
+  { value: '296x160', label: '296x160（2.9 候选）' },
+  { value: '360x184', label: '360x184（2.6/2.7 候选）' },
+  { value: '300x200', label: '300x200（2.7/3.0 候选）' },
+  { value: '400x300', label: '400x300（4.2 常见）' },
+  { value: '416x240', label: '416x240（3.7 常见）' },
+  { value: '648x480', label: '648x480（5.83 常见）' },
+] as const;
+
+const IMAGE_CANVAS_OPTIONS = [
+  { value: '03-0a:648x480', label: '03-0A 648x480（1770008e/4518 官方匹配）' },
+  { value: '03-04:400x300', label: '03-04 400x300（176002f7/4518 官方匹配）' },
+  ...CANVAS_SIZE_PRESETS.flatMap((item) => [
+    { value: `03:${item.value}`, label: `03 ${item.label}` },
+    { value: `03-04:${item.value}`, label: `03-04 ${item.label}` },
+    { value: `03-0a:${item.value}`, label: `03-0A ${item.label}` },
+    { value: `0c:${item.value}`, label: `0C ${item.label}` },
+  ]),
+  { value: 'custom', label: '自定义类型和尺寸' },
+] as const;
+
+function buildCanvasPreset(form: {
+  canvasPreset: string;
+  customCanvasType: '03' | '03-04' | '03-0a' | '0c';
+  customCanvasWidth: string;
+  customCanvasHeight: string;
+  customCanvasRowBytes: string;
+  customCanvasOutputRows: string;
+}) {
+  if (form.canvasPreset !== 'custom') {
+    return form.canvasPreset;
+  }
+  const width = Math.max(16, Math.trunc(Number(form.customCanvasWidth) || 800));
+  const height = Math.max(16, Math.trunc(Number(form.customCanvasHeight) || 480));
+  const rowBytes = Math.trunc(Number(form.customCanvasRowBytes) || 0);
+  const outputRows = Math.trunc(Number(form.customCanvasOutputRows) || 0);
+  const suffix = form.customCanvasType === '03' && rowBytes > 0 && outputRows > 0
+    ? `@${rowBytes}x${outputRows}`
+    : '';
+  return `${form.customCanvasType}:${width}x${height}${suffix}`;
+}
+
 function App() {
   const [activeView, setActiveView] = React.useState<'overview' | 'stations' | 'labels' | 'commands' | 'image-test' | 'cloud' | 'logs'>('overview');
   const [tokenReady, setTokenReady] = React.useState(Boolean(getToken()));
@@ -870,6 +926,12 @@ function App() {
     localImageName: '111111.jpg',
     fastMode: true,
     renderPreset: '2.13',
+    canvasPreset: '0c:800x480',
+    customCanvasType: '03-0a' as '03' | '03-04' | '03-0a' | '0c',
+    customCanvasWidth: '648',
+    customCanvasHeight: '480',
+    customCanvasRowBytes: '',
+    customCanvasOutputRows: '',
     renderScale: '1',
     dryRun: false,
     topN: 8,
@@ -2108,6 +2170,7 @@ function App() {
       formData.append('localImageName', imageTestForm.localImageName.trim());
       formData.append('fastMode', imageTestForm.fastMode ? 'true' : 'false');
       formData.append('renderPreset', imageTestForm.renderPreset);
+      formData.append('canvasPreset', buildCanvasPreset(imageTestForm));
       formData.append('renderScale', imageTestForm.renderScale);
       formData.append('dryRun', imageTestForm.dryRun ? 'true' : 'false');
       formData.append('topN', String(Math.max(1, Number(imageTestForm.topN) || 8)));
@@ -4421,6 +4484,71 @@ function App() {
                   ))}
                 </select>
               </label>
+              <label>画布/编码尺寸
+                <select
+                  value={imageTestForm.canvasPreset}
+                  onChange={(event) => setImageTestForm((current) => ({ ...current, canvasPreset: event.target.value }))}
+                >
+                  {IMAGE_CANVAS_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>{item.label}</option>
+                  ))}
+                </select>
+              </label>
+              {imageTestForm.canvasPreset === 'custom' && (
+                <>
+                  <label>自定义类型
+                    <select
+                      value={imageTestForm.customCanvasType}
+                      onChange={(event) => setImageTestForm((current) => ({ ...current, customCanvasType: event.target.value as '03' | '03-04' | '03-0a' | '0c' }))}
+                    >
+                      <option value="03">03（1bpp 服务 03）</option>
+                      <option value="03-04">03-04（2bpp 服务 03，176002f7/4518）</option>
+                      <option value="03-0a">03-0A（2bpp 服务 03，1770008e/4518）</option>
+                      <option value="0c">0C（2bpp 服务 0C）</option>
+                    </select>
+                  </label>
+                  <label>自定义宽
+                    <input
+                      type="number"
+                      min={16}
+                      max={1200}
+                      value={imageTestForm.customCanvasWidth}
+                      onChange={(event) => setImageTestForm((current) => ({ ...current, customCanvasWidth: event.target.value }))}
+                    />
+                  </label>
+                  <label>自定义高
+                    <input
+                      type="number"
+                      min={16}
+                      max={1200}
+                      value={imageTestForm.customCanvasHeight}
+                      onChange={(event) => setImageTestForm((current) => ({ ...current, customCanvasHeight: event.target.value }))}
+                    />
+                  </label>
+                  {imageTestForm.customCanvasType === '03' && (
+                    <>
+                      <label>03 行字节
+                        <input
+                          type="number"
+                          min={1}
+                          placeholder="自动"
+                          value={imageTestForm.customCanvasRowBytes}
+                          onChange={(event) => setImageTestForm((current) => ({ ...current, customCanvasRowBytes: event.target.value }))}
+                        />
+                      </label>
+                      <label>03 输出行数
+                        <input
+                          type="number"
+                          min={1}
+                          placeholder="自动"
+                          value={imageTestForm.customCanvasOutputRows}
+                          onChange={(event) => setImageTestForm((current) => ({ ...current, customCanvasOutputRows: event.target.value }))}
+                        />
+                      </label>
+                    </>
+                  )}
+                </>
+              )}
               <label>图片缩放
                 <select
                   value={imageTestForm.renderScale}
@@ -4468,10 +4596,11 @@ function App() {
                   '2. 选择渲染范围（全屏实验 / 模板槽位）',
                   '3. 全屏模式下优先用 stacked_rows（抗条纹）',
                   '4. 选择标签尺寸与图片缩放',
-                  '5. 选择本地图片文件',
-                  '6. 默认保持 fastMode=true + fourColor=true',
-                  '7. 点击“一键下发测试”',
-                  '8. 若只想看参数筛选结果，打开 dryRun',
+                  '5. 03 是 01-00-00-03 黑白/1bpp；03-04/03-0A 是 01-00-00-03 四色/2bpp 的不同容器类型；0C 是 01-00-00-0c 四色/2bpp',
+                  '6. 选择本地图片文件',
+                  '7. 默认保持 fastMode=true + fourColor=true',
+                  '8. 点击“一键下发测试”',
+                  '9. 若只想看参数筛选结果，打开 dryRun',
                 ].join('\n')}</pre>
               </div>
             </div>

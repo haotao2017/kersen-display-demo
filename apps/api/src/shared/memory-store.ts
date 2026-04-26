@@ -121,7 +121,7 @@ export class MemoryStore {
       return false;
     }
 
-    const data = JSON.parse(readFileSync(this.filePath, 'utf8')) as {
+    let data: {
       stores?: StoreConfig[];
       baseStations?: BaseStation[];
       labels?: Label[];
@@ -129,6 +129,15 @@ export class MemoryStore {
       requestLogs?: RequestLog[];
       officialDownlinkCaptures?: OfficialDownlinkCapture[];
     };
+    try {
+      const raw = readFileSync(this.filePath, 'utf8').trim();
+      if (!raw) {
+        return false;
+      }
+      data = JSON.parse(raw);
+    } catch {
+      return false;
+    }
 
     data.stores?.forEach((item) => this.stores.set(item.code, item));
     data.baseStations?.forEach((item) => this.baseStations.set(item.id, item));

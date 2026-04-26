@@ -104,6 +104,7 @@ type SendImage4515FileLocalGeneratedBody = SendImage4515FileBody & {
   dither?: boolean | string;
   resample?: 'nearest' | 'bilinear' | 'bicubic' | 'lanczos';
   renderPreset?: string;
+  canvasPreset?: string;
   renderScale?: number | string;
   dryRun?: boolean | string;
 };
@@ -742,7 +743,126 @@ export class OfficialApiService {
       const resample = this.parseResampleMode(body.resample);
       const renderPreset = this.parseRenderPreset(body.renderPreset);
       const renderScale = this.parseRenderScale(body.renderScale);
-      const service0c = this.buildService0cFromImage(prepared.buffer, { fitMode, dither, resample, renderPreset, renderScale });
+      const imageCanvas = this.parseImageCanvas(body.canvasPreset);
+      if (imageCanvas.protocol === '03') {
+        const service03Canvas = imageCanvas.canvas;
+        const service03 = this.buildSmallService03FromImage(prepared.buffer, {
+          fitMode,
+          dither,
+          resample,
+          renderPreset,
+          renderScale,
+          canvas: service03Canvas,
+        });
+        const service03B64 = service03.toString('base64');
+        const service03Sha256 = createHash('sha256').update(service03).digest('hex');
+        if (this.parseBoolean(body.dryRun, false)) {
+          return {
+            ok: true,
+            localOnly: true,
+            generated: true,
+            dryRun: true,
+            mode: 'service03_1bpp_local',
+            fitMode,
+            dither,
+            resample,
+            renderPreset,
+            renderScale,
+            canvasPreset: body.canvasPreset ?? `${imageCanvas.protocol}:${service03Canvas.width}x${service03Canvas.height}`,
+            canvas: service03Canvas,
+            imageSha256: createHash('sha256').update(prepared.buffer).digest('hex'),
+            generatedService03Bytes: service03.length,
+            generatedService03Sha256: service03Sha256,
+            autoSelection: {
+              mode: 'service03_1bpp_local',
+              reason: `按手动选择的 ${service03Canvas.width}x${service03Canvas.height} 画布生成 01-00-00-03 / a5a60102 / 1bpp 数据流。`,
+            },
+          };
+        }
+        const downlinkPayload = this.buildReadWriteSvcPayloadForService(body.eslCode, '01-00-00-03', service03B64, { bigsize: false });
+        const replay = this.apWebsocket.sendRaw(body.apId, downlinkPayload);
+        return {
+          ok: replay.ok,
+          localOnly: true,
+          generated: true,
+          mode: 'service03_1bpp_local',
+          fitMode,
+          dither,
+          resample,
+          renderPreset,
+          renderScale,
+          canvasPreset: body.canvasPreset ?? `${imageCanvas.protocol}:${service03Canvas.width}x${service03Canvas.height}`,
+          canvas: service03Canvas,
+          imageSha256: createHash('sha256').update(prepared.buffer).digest('hex'),
+          generatedService03Bytes: service03.length,
+          generatedService03Sha256: service03Sha256,
+          replay,
+          autoSelection: {
+            mode: 'service03_1bpp_local',
+            reason: `按手动选择的 ${service03Canvas.width}x${service03Canvas.height} 画布生成 01-00-00-03 / a5a60102 / 1bpp 数据流。`,
+          },
+        };
+      }
+      if (imageCanvas.protocol === '03_04' || imageCanvas.protocol === '03_0a') {
+        const service0304 = this.buildService03BppFromImage(prepared.buffer, {
+          fitMode,
+          dither,
+          resample,
+          renderPreset,
+          renderScale,
+          canvas: imageCanvas.canvas,
+          containerType: imageCanvas.protocol === '03_0a' ? 0x0a : 0x04,
+        });
+        const service0304B64 = service0304.toString('base64');
+        const service0304Sha256 = createHash('sha256').update(service0304).digest('hex');
+        if (this.parseBoolean(body.dryRun, false)) {
+          return {
+            ok: true,
+            localOnly: true,
+            generated: true,
+            dryRun: true,
+            mode: 'service03_2bpp_local',
+            fitMode,
+            dither,
+            resample,
+            renderPreset,
+            renderScale,
+            canvasPreset: body.canvasPreset ?? `${imageCanvas.protocol === '03_0a' ? '03-0a' : '03-04'}:${imageCanvas.canvas.width}x${imageCanvas.canvas.height}`,
+            canvas: imageCanvas.canvas,
+            imageSha256: createHash('sha256').update(prepared.buffer).digest('hex'),
+            generatedService03Bytes: service0304.length,
+            generatedService03Sha256: service0304Sha256,
+            autoSelection: {
+              mode: 'service03_2bpp_local',
+              reason: `按官方形态生成 01-00-00-03 / a5a6${imageCanvas.protocol === '03_0a' ? '0a' : '04'}02 / 2bpp / ${imageCanvas.canvas.width}x${imageCanvas.canvas.height} 数据流。`,
+            },
+          };
+        }
+        const downlinkPayload = this.buildReadWriteSvcPayloadForService(body.eslCode, '01-00-00-03', service0304B64, { bigsize: false });
+        const replay = this.apWebsocket.sendRaw(body.apId, downlinkPayload);
+        return {
+          ok: replay.ok,
+          localOnly: true,
+          generated: true,
+          mode: 'service03_2bpp_local',
+          fitMode,
+          dither,
+          resample,
+          renderPreset,
+          renderScale,
+          canvasPreset: body.canvasPreset ?? `${imageCanvas.protocol === '03_0a' ? '03-0a' : '03-04'}:${imageCanvas.canvas.width}x${imageCanvas.canvas.height}`,
+          canvas: imageCanvas.canvas,
+          imageSha256: createHash('sha256').update(prepared.buffer).digest('hex'),
+          generatedService03Bytes: service0304.length,
+          generatedService03Sha256: service0304Sha256,
+          replay,
+          autoSelection: {
+            mode: 'service03_2bpp_local',
+            reason: `按官方形态生成 01-00-00-03 / a5a6${imageCanvas.protocol === '03_0a' ? '0a' : '04'}02 / 2bpp / ${imageCanvas.canvas.width}x${imageCanvas.canvas.height} 数据流。`,
+          },
+        };
+      }
+      const service0c = this.buildService0cFromImage(prepared.buffer, { fitMode, dither, resample, renderPreset, renderScale, canvas: imageCanvas.canvas });
       const service0cB64 = service0c.toString('base64');
       if (this.parseBoolean(body.dryRun, false)) {
         return {
@@ -756,6 +876,8 @@ export class OfficialApiService {
           resample,
           renderPreset,
           renderScale,
+          canvasPreset: body.canvasPreset ?? `0c:${imageCanvas.canvas.width}x${imageCanvas.canvas.height}`,
+          canvas: imageCanvas.canvas,
           imageSha256: createHash('sha256').update(prepared.buffer).digest('hex'),
           generatedService0cBytes: service0c.length,
           generatedService0cSha256: createHash('sha256').update(service0c).digest('hex'),
@@ -773,6 +895,8 @@ export class OfficialApiService {
         resample,
         renderPreset,
         renderScale,
+        canvasPreset: body.canvasPreset ?? `0c:${imageCanvas.canvas.width}x${imageCanvas.canvas.height}`,
+        canvas: imageCanvas.canvas,
         imageSha256: createHash('sha256').update(prepared.buffer).digest('hex'),
         generatedService0cBytes: service0c.length,
         generatedService0cSha256: createHash('sha256').update(service0c).digest('hex'),
@@ -1276,6 +1400,54 @@ export class OfficialApiService {
       '10.2': { width: 960, height: 640 },
     };
     return map[preset] ?? map['2.13'];
+  }
+
+  private parseImageCanvas(value?: string): {
+    protocol: '03' | '03_04' | '03_0a' | '0c';
+    canvas: { width: number; height: number; rowBytes: number; outputRows: number; outputBytes: number };
+  } {
+    let normalized = String(value || '').trim().toLowerCase();
+    if (!normalized || normalized === '0c_800x480' || normalized === 'service0c' || normalized === '800x480_0c') {
+      normalized = '0c:800x480';
+    }
+    const explicit = normalized.match(/^(03-04|03_04|0304|03-0a|03_0a|030a|03|0c)[:_](.+)$/);
+    const protocol = explicit
+      ? (
+        ['03-04', '03_04', '0304'].includes(explicit[1])
+          ? '03_04'
+          : ['03-0a', '03_0a', '030a'].includes(explicit[1])
+            ? '03_0a'
+            : explicit[1]
+      ) as '03' | '03_04' | '03_0a' | '0c'
+      : '03';
+    const spec = explicit ? explicit[2] : normalized;
+    const match = spec.match(/^(\d{2,4})x(\d{2,4})(?:@(\d{1,4})x(\d{1,4}))?$/);
+    if (!match) {
+      return {
+        protocol: '0c',
+        canvas: { width: 800, height: 480, rowBytes: 200, outputRows: 480, outputBytes: 96000 },
+      };
+    }
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    const rowBytes = protocol === '03'
+      ? match[3] ? Number(match[3]) : Math.ceil(width / 8)
+      : Math.ceil(width / 4);
+    const outputRows = match[4] ? Number(match[4]) : height;
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 16 || height < 16 || width > 1200 || height > 1200) {
+      return {
+        protocol: '0c',
+        canvas: { width: 800, height: 480, rowBytes: 200, outputRows: 480, outputBytes: 96000 },
+      };
+    }
+    const minRowBytes = protocol === '03' ? Math.ceil(width / 8) : Math.ceil(width / 4);
+    if (!Number.isInteger(rowBytes) || !Number.isInteger(outputRows) || rowBytes < minRowBytes || outputRows < height || rowBytes > 4096 || outputRows > 1200) {
+      return {
+        protocol: '0c',
+        canvas: { width: 800, height: 480, rowBytes: 200, outputRows: 480, outputBytes: 96000 },
+      };
+    }
+    return { protocol, canvas: { width, height, rowBytes, outputRows, outputBytes: rowBytes * outputRows } };
   }
 
   private parseRenderScale(value: number | string | undefined) {
@@ -1848,6 +2020,7 @@ export class OfficialApiService {
       resample?: 'nearest' | 'bilinear' | 'bicubic' | 'lanczos';
       renderPreset?: string;
       renderScale?: number;
+      canvas?: { width: number; height: number; rowBytes: number; outputRows: number; outputBytes: number };
     },
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'esl-service0c-'));
@@ -1856,6 +2029,7 @@ export class OfficialApiService {
     writeFileSync(input, imageBuffer);
     const preset = this.parseRenderPreset(options?.renderPreset);
     const dims = this.getRenderPresetDimensions(preset);
+    const canvas = options?.canvas ?? { width: 800, height: 480, rowBytes: 200, outputRows: 480, outputBytes: 96000 };
     try {
       execFileSync('python3', [
         '-c',
@@ -1863,7 +2037,7 @@ export class OfficialApiService {
           'from PIL import Image',
           'from PIL import ImageOps',
           'import sys',
-          'inp, out, fit_mode, dither_mode, resample_name, render_scale, preset_w, preset_h = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], float(sys.argv[6]), int(sys.argv[7]), int(sys.argv[8])',
+          'inp, out, fit_mode, dither_mode, resample_name, render_scale, preset_w, preset_h, canvas_w, canvas_h, row_bytes, output_rows = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], float(sys.argv[6]), int(sys.argv[7]), int(sys.argv[8]), int(sys.argv[9]), int(sys.argv[10]), int(sys.argv[11]), int(sys.argv[12])',
           'img = Image.open(inp).convert("RGB")',
           'resample_map = {"nearest": Image.Resampling.NEAREST, "bilinear": Image.Resampling.BILINEAR, "bicubic": Image.Resampling.BICUBIC, "lanczos": Image.Resampling.LANCZOS}',
           'resample = resample_map.get(resample_name, Image.Resampling.BILINEAR)',
@@ -1884,24 +2058,25 @@ export class OfficialApiService {
           '  slot = Image.new("RGB", target_size, bg)',
           '  slot.paste(scaled, ((preset_w - sw)//2, (preset_h - sh)//2))',
           '  img = slot',
-          'canvas = Image.new("RGB", (800,480), (255,255,255))',
-          'canvas.paste(img, ((800 - preset_w)//2, (480 - preset_h)//2))',
+          'canvas = Image.new("RGB", (canvas_w,canvas_h), (255,255,255))',
+          'canvas.paste(img, ((canvas_w - preset_w)//2, (canvas_h - preset_h)//2))',
           'img = canvas',
           'if dither_mode == "1":',
           '  pal = Image.new("P", (1,1))',
           '  pal.putpalette([0,0,0,255,255,255,255,255,0,255,0,0] + [0,0,0]*252)',
           '  img = img.quantize(palette=pal, dither=Image.Dither.FLOYDSTEINBERG).convert("RGB")',
-          '# service0c: 800x480, 2bpp, 每行 200 字节。0x55 是白底，因此 white=1。',
+          '# service0c: 2bpp。0x55 是白底，因此 white=1。',
           'palette = [((0,0,0),0), ((255,255,255),1), ((255,255,0),2), ((255,0,0),3)]',
           'pix = img.load()',
           'rows = bytearray()',
-          'for y in range(480):',
-          '  vals = []',
-          '  for x in range(800):',
-          '    r,g,b = pix[x,y]',
-          '    best = min(palette, key=lambda p: (r-p[0][0])**2 + (g-p[0][1])**2 + (b-p[0][2])**2)',
-          '    vals.append(best[1])',
-          '  for i in range(0,800,4):',
+          'for y in range(output_rows):',
+          '  vals = [1] * (row_bytes * 4)',
+          '  if y < canvas_h:',
+          '    for x in range(min(canvas_w, row_bytes * 4)):',
+          '      r,g,b = pix[x,y]',
+          '      best = min(palette, key=lambda p: (r-p[0][0])**2 + (g-p[0][1])**2 + (b-p[0][2])**2)',
+          '      vals[x] = best[1]',
+          '  for i in range(0,row_bytes * 4,4):',
           '    rows.append(((vals[i]&3)<<6) | ((vals[i+1]&3)<<4) | ((vals[i+2]&3)<<2) | (vals[i+3]&3))',
           'open(out, "wb").write(rows)',
         ].join('\n'),
@@ -1913,9 +2088,13 @@ export class OfficialApiService {
         String(options?.renderScale ?? 1),
         String(dims.width),
         String(dims.height),
+        String(canvas.width),
+        String(canvas.height),
+        String(canvas.rowBytes),
+        String(canvas.outputRows),
       ], { stdio: 'pipe' });
       const rows = readFileSync(output);
-      if (rows.length !== 200 * 480) {
+      if (rows.length !== canvas.outputBytes) {
         throw new Error('invalid_service0c_rows_size');
       }
       return rows;
@@ -1932,6 +2111,7 @@ export class OfficialApiService {
       resample?: 'nearest' | 'bilinear' | 'bicubic' | 'lanczos';
       renderPreset?: string;
       renderScale?: number;
+      canvas?: { width: number; height: number; rowBytes: number; outputRows: number; outputBytes: number };
     },
   ) {
     const rows = this.packImageToService0cRowsBytes(imageBuffer, options);
@@ -1948,6 +2128,134 @@ export class OfficialApiService {
       parts.push(header, comp);
     }
     return Buffer.concat(parts);
+  }
+
+  private buildService03BppFromImage(
+    imageBuffer: Buffer,
+    options?: {
+      fitMode?: 'stretch' | 'contain_black' | 'contain_white' | 'cover';
+      dither?: boolean;
+      resample?: 'nearest' | 'bilinear' | 'bicubic' | 'lanczos';
+      renderPreset?: string;
+      renderScale?: number;
+      canvas?: { width: number; height: number; rowBytes: number; outputRows: number; outputBytes: number };
+      containerType?: 0x04 | 0x0a;
+    },
+  ) {
+    const rows = this.packImageToService0cRowsBytes(imageBuffer, options);
+    const chunks: Buffer[] = [];
+    for (let offset = 0; offset < rows.length; offset += 8192) {
+      chunks.push(rows.subarray(offset, Math.min(offset + 8192, rows.length)));
+    }
+    const parts: Buffer[] = [Buffer.from([0xa5, 0xa6, options?.containerType ?? 0x04, 0x02])];
+    for (let index = 0; index < chunks.length; index += 1) {
+      const comp = zlib.deflateRawSync(chunks[index], { level: 9 });
+      const header = Buffer.allocUnsafe(3);
+      header[0] = (index + 1) & 0xff;
+      header.writeUInt16LE(comp.length & 0xffff, 1);
+      parts.push(header, comp);
+    }
+    return Buffer.concat(parts);
+  }
+
+  private packImageToSmallService03RowsBytes(
+    imageBuffer: Buffer,
+    options?: {
+      fitMode?: 'stretch' | 'contain_black' | 'contain_white' | 'cover';
+      dither?: boolean;
+      resample?: 'nearest' | 'bilinear' | 'bicubic' | 'lanczos';
+      renderPreset?: string;
+      renderScale?: number;
+      canvas?: { width: number; height: number; rowBytes: number; outputRows: number; outputBytes: number };
+    },
+  ) {
+    const dims = options?.canvas ?? { width: 200, height: 160, rowBytes: 25, outputRows: 160, outputBytes: 4000 };
+    const dir = mkdtempSync(join(tmpdir(), 'esl-service03-small-'));
+    const input = join(dir, 'input.png');
+    const output = join(dir, 'rows.bin');
+    writeFileSync(input, imageBuffer);
+    try {
+      execFileSync('python3', [
+        '-c',
+        [
+          'from PIL import Image',
+          'from PIL import ImageOps',
+          'import sys',
+          'inp, out, fit_mode, dither_mode, resample_name, render_scale, target_w, target_h, row_bytes, output_rows = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], float(sys.argv[6]), int(sys.argv[7]), int(sys.argv[8]), int(sys.argv[9]), int(sys.argv[10])',
+          'img = Image.open(inp).convert("RGB")',
+          'resample_map = {"nearest": Image.Resampling.NEAREST, "bilinear": Image.Resampling.BILINEAR, "bicubic": Image.Resampling.BICUBIC, "lanczos": Image.Resampling.LANCZOS}',
+          'resample = resample_map.get(resample_name, Image.Resampling.BILINEAR)',
+          'target_size = (target_w, target_h)',
+          'if fit_mode == "contain_black":',
+          '  img = ImageOps.pad(img, target_size, method=resample, color=(0,0,0), centering=(0.5,0.5))',
+          'elif fit_mode == "contain_white":',
+          '  img = ImageOps.pad(img, target_size, method=resample, color=(255,255,255), centering=(0.5,0.5))',
+          'elif fit_mode == "cover":',
+          '  img = ImageOps.fit(img, target_size, method=resample, centering=(0.5,0.5))',
+          'else:',
+          '  img = img.resize(target_size, resample)',
+          'if 0 < render_scale < 0.9999:',
+          '  sw = max(1, int(round(target_w * render_scale)))',
+          '  sh = max(1, int(round(target_h * render_scale)))',
+          '  scaled = img.resize((sw, sh), resample)',
+          '  bg = (0,0,0) if fit_mode == "contain_black" else (255,255,255)',
+          '  canvas = Image.new("RGB", target_size, bg)',
+          '  canvas.paste(scaled, ((target_w - sw)//2, (target_h - sh)//2))',
+          '  img = canvas',
+          'if dither_mode == "1":',
+          '  pal = Image.new("P", (1,1))',
+          '  pal.putpalette([0,0,0,255,255,255] + [0,0,0]*254)',
+          '  img = img.quantize(palette=pal, dither=Image.Dither.FLOYDSTEINBERG).convert("RGB")',
+          'pix = img.load()',
+          'rows = bytearray([0xff]) * (row_bytes * output_rows)',
+          'for y in range(target_h):',
+          '  for x in range(target_w):',
+          '    r,g,b = pix[x,y]',
+          '    gray = r * 0.299 + g * 0.587 + b * 0.114',
+          '    if gray < 180:',
+          '      byte_index = y * row_bytes + (x // 8)',
+          '      if byte_index < len(rows):',
+          '        rows[byte_index] &= ~(1 << (7 - (x % 8)))',
+          'open(out, "wb").write(rows)',
+        ].join('\n'),
+        input,
+        output,
+        options?.fitMode || 'stretch',
+        options?.dither ? '1' : '0',
+        options?.resample || 'bilinear',
+        String(options?.renderScale ?? 1),
+        String(dims.width),
+        String(dims.height),
+        String(dims.rowBytes),
+        String(dims.outputRows),
+      ], { stdio: 'pipe' });
+      const rows = readFileSync(output);
+      if (rows.length !== dims.outputBytes) {
+        throw new Error('invalid_small_service03_rows_size');
+      }
+      return rows;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  private buildSmallService03FromImage(
+    imageBuffer: Buffer,
+    options?: {
+      fitMode?: 'stretch' | 'contain_black' | 'contain_white' | 'cover';
+      dither?: boolean;
+      resample?: 'nearest' | 'bilinear' | 'bicubic' | 'lanczos';
+      renderPreset?: string;
+      renderScale?: number;
+      canvas?: { width: number; height: number; rowBytes: number; outputRows: number; outputBytes: number };
+    },
+  ) {
+    const rows = this.packImageToSmallService03RowsBytes(imageBuffer, options);
+    const comp = zlib.deflateRawSync(rows, { level: 9 });
+    const header = Buffer.allocUnsafe(3);
+    header[0] = 1;
+    header.writeUInt16LE(comp.length & 0xffff, 1);
+    return Buffer.concat([Buffer.from([0xa5, 0xa6, 0x01, 0x02]), header, comp]);
   }
 
   private build4515F2SlotBundle(

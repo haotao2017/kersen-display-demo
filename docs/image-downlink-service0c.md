@@ -25,6 +25,27 @@
 - `01-00-00-0c` 使用 `supersize=true`，实测 AP 回包会按大包分片执行，例如 `chunk_idx=1/2`，`errno=0`。
 - 本地生成的 `service0c` 已经可以全屏刷出项目根目录的 `111111.jpg`。
 
+### 1.54 小屏例外
+
+`15403fca` 这类 1.54 小屏的官方抓包不是 `01-00-00-0c`，而是：
+
+```text
+READ_WRITE_SVC / WRITE_SVC / service=01-00-00-03 / bigsize=false
+容器头: a5 a6 01 02
+chunk 数: 1
+解压后长度: 4000 bytes = 200 x 160 x 1bpp / 8
+```
+
+因此图片测试页现在把“标签尺寸”和“画布/编码尺寸”拆开：
+
+- `0C 800x480`：继续生成 `01-00-00-0c` / 800x480 / 2bpp / `supersize=true`。
+- `03 WxH`：生成 `01-00-00-03` / `a5 a6 01 02` / 1bpp / 单 chunk / `bigsize=false`。
+- `03-04 400x300`：官方 `176002f7 + 4518` 匹配，生成 `01-00-00-03` / `a5 a6 04 02` / 2bpp / `400x300`。
+- `03-0A 648x480`：官方 `1770008e + 4518` 匹配，生成 `01-00-00-03` / `a5 a6 0a 02` / 2bpp / `648x480`。
+- `03 WxH strideN totalM`：显示区仍按 `WxH` 渲染，但输出帧按指定行字节/行数补齐，用于排查上下重叠、行跨度不匹配的问题。
+
+如果强行给小屏写入 800x480 的 `service0c`，设备会把数据按自己的小屏格式解释，常见现象就是白屏或黑白竖条。`15403fca` 官方样本对应 `03 200x160`，但实际不同批次可能有差异，可以在页面里逐个试画布尺寸。
+
 ## 入口接口
 
 控制台“图片测试”页最终应选择：
@@ -51,6 +72,7 @@ renderMode=service0c_local
 localImageName=111111.jpg
 fourColor=true
 renderPreset=2.13
+canvasPreset=0c_800x480
 renderScale=1
 sendMode=direct
 dryRun=false

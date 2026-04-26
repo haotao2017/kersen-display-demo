@@ -162,6 +162,7 @@ export class OfficialApiController {
       dither?: boolean | string;
       resample?: 'nearest' | 'bilinear' | 'bicubic' | 'lanczos';
       renderPreset?: string;
+      canvasPreset?: string;
       renderScale?: number | string;
       dryRun?: boolean | string;
     },
@@ -190,6 +191,7 @@ export class OfficialApiController {
       resamples?: Array<'nearest' | 'bilinear' | 'bicubic' | 'lanczos'>;
       dithers?: Array<boolean | string>;
       renderPreset?: string;
+      canvasPreset?: string;
       renderScale?: number | string;
       topN?: number;
       fastMode?: boolean | string;
@@ -226,6 +228,7 @@ export class OfficialApiController {
       resamples?: Array<'nearest' | 'bilinear' | 'bicubic' | 'lanczos'>;
       dithers?: Array<boolean | string>;
       renderPreset?: string;
+      canvasPreset?: string;
       renderScale?: number | string;
       topN?: number;
       fastMode?: boolean | string;
