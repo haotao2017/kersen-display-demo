@@ -720,6 +720,13 @@ const commandTypes = [
 const DEFAULT_IMAGE_TEST_AP_ID = 'e4:38:19:2a:09:de';
 const LABEL_SIZE_OPTIONS = [
   { value: '2.13', label: '2.13 英寸' },
+  { value: '128x250', label: '128x250（15403FCA 竖屏黑白）' },
+  { value: '200x200', label: '200x200（1700009F 方屏测试）' },
+  { value: '240x416', label: '240x416（17500175 竖屏测试）' },
+  { value: '256x250', label: '256x250（1710408C 黑白测试）' },
+  { value: '184x384', label: '184x384（174004d2 竖屏测试）' },
+  { value: '128x296', label: '128x296（173014D6 竖屏测试）' },
+  { value: '152x296', label: '152x296（17200227 竖屏测试）' },
   { value: '1.54', label: '1.54 英寸' },
   { value: '2.90', label: '2.90 英寸' },
   { value: '4.2', label: '4.2 英寸' },
@@ -754,10 +761,32 @@ const CANVAS_SIZE_PRESETS = [
 ] as const;
 
 const IMAGE_CANVAS_OPTIONS = [
+  { value: '03-02:200x200#b0y1r2w3', label: '03-02 200x200（1700009F/4518 官方匹配，b0/y1/r2/w3）' },
+  { value: '03-02:200x200#b0y2r3w1', label: '03-02 200x200（1700009F/4518，实测色码备选 b0/y2/r3/w1）' },
+  { value: '03-02:200x200', label: '03-02 200x200（1700009F/4518，默认 b0/y1/r2/w3）' },
+  { value: '03-01:128x250#b0y2r3w1', label: '03-01 128x250（1710408C/4518，按实测修正 b0/y2/r3/w1）' },
+  { value: '03-01:128x250#b0y1r2w3', label: '03-01 128x250（1710408C/4518 官方匹配，2bpp b0/y1/r2/w3）' },
+  { value: '03:256x250', label: '03 256x250（1710408C/4518，误按 1bpp 解读，仅黑白）' },
+  { value: '03-02:256x250#b0y2r3w1', label: '03-02 256x250（1710408C 彩色实验，b0/y2/r3/w1）' },
+  { value: '03-02:256x250', label: '03-02 256x250（1710408C 彩色实验，默认 b0/y1/r2/w3）' },
+  { value: '03:128x250', label: '03 128x250（15403FCA/4518 官方匹配，1bpp）' },
+  { value: '03-02:128x250#b0y2r3w1', label: '03-02 128x250（15403FCA 彩色实验，b0/y2/r3/w1）' },
+  { value: '03-02:128x250', label: '03-02 128x250（15403FCA 彩色实验，默认 b0/y1/r2/w3）' },
+  { value: '03-02:152x296#b0y2r3w1', label: '03-02 152x296（17200227/4518，按实测修正 b0/y2/r3/w1）' },
+  { value: '03-02:152x296', label: '03-02 152x296（17200227/4518，默认 b0/y1/r2/w3）' },
+  { value: '03-02:128x296#b0y2r3w1', label: '03-02 128x296（173014D6/4518，按实测修正 b0/y2/r3/w1）' },
+  { value: '03-02:128x296', label: '03-02 128x296（173014D6/4518，默认 b0/y1/r2/w3）' },
+  { value: '03-03:184x384#b0y1r2w3', label: '03-03 184x384（174004d2/4518，官方色码 b0/y1/r2/w3）' },
+  { value: '03-03:184x384#b0y2r3w1', label: '03-03 184x384（174004d2/4518，按实测修正 b0/y2/r3/w1）' },
+  { value: '03-03:184x384', label: '03-03 184x384（174004d2/4518，默认 b0/y1/r2/w3）' },
   { value: '03-0a:648x480', label: '03-0A 648x480（1770008e/4518 官方匹配）' },
+  { value: '03-04:240x416#b0y1r2w3', label: '03-04 240x416（17500175/4518 官方匹配，b0/y1/r2/w3）' },
+  { value: '03-04:240x416#b0y2r3w1', label: '03-04 240x416（17500175/4518，实测色码备选 b0/y2/r3/w1）' },
   { value: '03-04:400x300', label: '03-04 400x300（176002f7/4518 官方匹配）' },
   ...CANVAS_SIZE_PRESETS.flatMap((item) => [
     { value: `03:${item.value}`, label: `03 ${item.label}` },
+    { value: `03-01:${item.value}`, label: `03-01 ${item.label}` },
+    { value: `03-02:${item.value}`, label: `03-02 ${item.label}` },
     { value: `03-04:${item.value}`, label: `03-04 ${item.label}` },
     { value: `03-0a:${item.value}`, label: `03-0A ${item.label}` },
     { value: `0c:${item.value}`, label: `0C ${item.label}` },
@@ -765,9 +794,23 @@ const IMAGE_CANVAS_OPTIONS = [
   { value: 'custom', label: '自定义类型和尺寸' },
 ] as const;
 
+const IMAGE_ROTATE_OPTIONS = [
+  { value: 'none', label: '不旋转' },
+  { value: 'cw90', label: '顺时针 90°' },
+  { value: 'ccw90', label: '逆时针 90°' },
+  { value: '180', label: '旋转 180°' },
+] as const;
+
+const IMAGE_FLIP_OPTIONS = [
+  { value: 'none', label: '不翻转' },
+  { value: 'horizontal', label: '水平镜像' },
+  { value: 'vertical', label: '垂直镜像' },
+  { value: 'both', label: '水平 + 垂直镜像' },
+] as const;
+
 function buildCanvasPreset(form: {
   canvasPreset: string;
-  customCanvasType: '03' | '03-04' | '03-0a' | '0c';
+  customCanvasType: '03' | '03-01' | '03-02' | '03-03' | '03-04' | '03-0a' | '0c';
   customCanvasWidth: string;
   customCanvasHeight: string;
   customCanvasRowBytes: string;
@@ -927,12 +970,14 @@ function App() {
     fastMode: true,
     renderPreset: '2.13',
     canvasPreset: '0c:800x480',
-    customCanvasType: '03-0a' as '03' | '03-04' | '03-0a' | '0c',
+    customCanvasType: '03-0a' as '03' | '03-01' | '03-02' | '03-03' | '03-04' | '03-0a' | '0c',
     customCanvasWidth: '648',
     customCanvasHeight: '480',
     customCanvasRowBytes: '',
     customCanvasOutputRows: '',
     renderScale: '1',
+    imageRotate: 'none' as 'none' | 'cw90' | 'ccw90' | '180',
+    imageFlip: 'none' as 'none' | 'horizontal' | 'vertical' | 'both',
     dryRun: false,
     topN: 8,
   });
@@ -2172,6 +2217,8 @@ function App() {
       formData.append('renderPreset', imageTestForm.renderPreset);
       formData.append('canvasPreset', buildCanvasPreset(imageTestForm));
       formData.append('renderScale', imageTestForm.renderScale);
+      formData.append('imageRotate', imageTestForm.imageRotate);
+      formData.append('imageFlip', imageTestForm.imageFlip);
       formData.append('dryRun', imageTestForm.dryRun ? 'true' : 'false');
       formData.append('topN', String(Math.max(1, Number(imageTestForm.topN) || 8)));
       if (imageTestFile) {
@@ -4499,9 +4546,12 @@ function App() {
                   <label>自定义类型
                     <select
                       value={imageTestForm.customCanvasType}
-                      onChange={(event) => setImageTestForm((current) => ({ ...current, customCanvasType: event.target.value as '03' | '03-04' | '03-0a' | '0c' }))}
+                      onChange={(event) => setImageTestForm((current) => ({ ...current, customCanvasType: event.target.value as '03' | '03-01' | '03-02' | '03-03' | '03-04' | '03-0a' | '0c' }))}
                     >
                       <option value="03">03（1bpp 服务 03）</option>
+                      <option value="03-01">03-01（2bpp 服务 03，容器 01）</option>
+                      <option value="03-02">03-02（2bpp 服务 03，173014D6/4518）</option>
+                      <option value="03-03">03-03（2bpp 服务 03，174004d2/4518）</option>
                       <option value="03-04">03-04（2bpp 服务 03，176002f7/4518）</option>
                       <option value="03-0a">03-0A（2bpp 服务 03，1770008e/4518）</option>
                       <option value="0c">0C（2bpp 服务 0C）</option>
@@ -4562,6 +4612,26 @@ function App() {
                   <option value="0.5">50%（半屏）</option>
                   <option value="0.4">40%</option>
                   <option value="0.3">30%</option>
+                </select>
+              </label>
+              <label>图片旋转
+                <select
+                  value={imageTestForm.imageRotate}
+                  onChange={(event) => setImageTestForm((current) => ({ ...current, imageRotate: event.target.value as 'none' | 'cw90' | 'ccw90' | '180' }))}
+                >
+                  {IMAGE_ROTATE_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>{item.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>图片翻转
+                <select
+                  value={imageTestForm.imageFlip}
+                  onChange={(event) => setImageTestForm((current) => ({ ...current, imageFlip: event.target.value as 'none' | 'horizontal' | 'vertical' | 'both' }))}
+                >
+                  {IMAGE_FLIP_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>{item.label}</option>
+                  ))}
                 </select>
               </label>
               <label>测试图片

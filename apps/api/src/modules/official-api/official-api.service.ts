@@ -106,6 +106,8 @@ type SendImage4515FileLocalGeneratedBody = SendImage4515FileBody & {
   renderPreset?: string;
   canvasPreset?: string;
   renderScale?: number | string;
+  imageRotate?: 'none' | 'cw90' | 'ccw90' | '180';
+  imageFlip?: 'none' | 'horizontal' | 'vertical' | 'both';
   dryRun?: boolean | string;
 };
 
@@ -743,6 +745,8 @@ export class OfficialApiService {
       const resample = this.parseResampleMode(body.resample);
       const renderPreset = this.parseRenderPreset(body.renderPreset);
       const renderScale = this.parseRenderScale(body.renderScale);
+      const imageRotate = this.parseImageRotate(body.imageRotate);
+      const imageFlip = this.parseImageFlip(body.imageFlip);
       const imageCanvas = this.parseImageCanvas(body.canvasPreset);
       if (imageCanvas.protocol === '03') {
         const service03Canvas = imageCanvas.canvas;
@@ -752,6 +756,8 @@ export class OfficialApiService {
           resample,
           renderPreset,
           renderScale,
+          imageRotate,
+          imageFlip,
           canvas: service03Canvas,
         });
         const service03B64 = service03.toString('base64');
@@ -768,6 +774,8 @@ export class OfficialApiService {
             resample,
             renderPreset,
             renderScale,
+            imageRotate,
+            imageFlip,
             canvasPreset: body.canvasPreset ?? `${imageCanvas.protocol}:${service03Canvas.width}x${service03Canvas.height}`,
             canvas: service03Canvas,
             imageSha256: createHash('sha256').update(prepared.buffer).digest('hex'),
@@ -791,6 +799,8 @@ export class OfficialApiService {
           resample,
           renderPreset,
           renderScale,
+          imageRotate,
+          imageFlip,
           canvasPreset: body.canvasPreset ?? `${imageCanvas.protocol}:${service03Canvas.width}x${service03Canvas.height}`,
           canvas: service03Canvas,
           imageSha256: createHash('sha256').update(prepared.buffer).digest('hex'),
@@ -803,15 +813,20 @@ export class OfficialApiService {
           },
         };
       }
-      if (imageCanvas.protocol === '03_04' || imageCanvas.protocol === '03_0a') {
+      if (imageCanvas.protocol === '03_01' || imageCanvas.protocol === '03_02' || imageCanvas.protocol === '03_03' || imageCanvas.protocol === '03_04' || imageCanvas.protocol === '03_0a') {
+        const containerType = imageCanvas.protocol === '03_0a' ? 0x0a : imageCanvas.protocol === '03_04' ? 0x04 : imageCanvas.protocol === '03_03' ? 0x03 : imageCanvas.protocol === '03_02' ? 0x02 : 0x01;
+        const protocolLabel = imageCanvas.protocol === '03_0a' ? '03-0a' : imageCanvas.protocol === '03_04' ? '03-04' : imageCanvas.protocol === '03_03' ? '03-03' : imageCanvas.protocol === '03_02' ? '03-02' : '03-01';
         const service0304 = this.buildService03BppFromImage(prepared.buffer, {
           fitMode,
           dither,
           resample,
           renderPreset,
           renderScale,
+          imageRotate,
+          imageFlip,
           canvas: imageCanvas.canvas,
-          containerType: imageCanvas.protocol === '03_0a' ? 0x0a : 0x04,
+          containerType,
+          paletteCodes: imageCanvas.paletteCodes,
         });
         const service0304B64 = service0304.toString('base64');
         const service0304Sha256 = createHash('sha256').update(service0304).digest('hex');
@@ -827,14 +842,16 @@ export class OfficialApiService {
             resample,
             renderPreset,
             renderScale,
-            canvasPreset: body.canvasPreset ?? `${imageCanvas.protocol === '03_0a' ? '03-0a' : '03-04'}:${imageCanvas.canvas.width}x${imageCanvas.canvas.height}`,
+            imageRotate,
+            imageFlip,
+            canvasPreset: body.canvasPreset ?? `${protocolLabel}:${imageCanvas.canvas.width}x${imageCanvas.canvas.height}`,
             canvas: imageCanvas.canvas,
             imageSha256: createHash('sha256').update(prepared.buffer).digest('hex'),
             generatedService03Bytes: service0304.length,
             generatedService03Sha256: service0304Sha256,
             autoSelection: {
               mode: 'service03_2bpp_local',
-              reason: `按官方形态生成 01-00-00-03 / a5a6${imageCanvas.protocol === '03_0a' ? '0a' : '04'}02 / 2bpp / ${imageCanvas.canvas.width}x${imageCanvas.canvas.height} 数据流。`,
+              reason: `按官方形态生成 01-00-00-03 / a5a6${containerType.toString(16).padStart(2, '0')}02 / 2bpp / ${imageCanvas.canvas.width}x${imageCanvas.canvas.height} 数据流。`,
             },
           };
         }
@@ -850,7 +867,9 @@ export class OfficialApiService {
           resample,
           renderPreset,
           renderScale,
-          canvasPreset: body.canvasPreset ?? `${imageCanvas.protocol === '03_0a' ? '03-0a' : '03-04'}:${imageCanvas.canvas.width}x${imageCanvas.canvas.height}`,
+          imageRotate,
+          imageFlip,
+          canvasPreset: body.canvasPreset ?? `${protocolLabel}:${imageCanvas.canvas.width}x${imageCanvas.canvas.height}`,
           canvas: imageCanvas.canvas,
           imageSha256: createHash('sha256').update(prepared.buffer).digest('hex'),
           generatedService03Bytes: service0304.length,
@@ -858,11 +877,11 @@ export class OfficialApiService {
           replay,
           autoSelection: {
             mode: 'service03_2bpp_local',
-            reason: `按官方形态生成 01-00-00-03 / a5a6${imageCanvas.protocol === '03_0a' ? '0a' : '04'}02 / 2bpp / ${imageCanvas.canvas.width}x${imageCanvas.canvas.height} 数据流。`,
+            reason: `按官方形态生成 01-00-00-03 / a5a6${containerType.toString(16).padStart(2, '0')}02 / 2bpp / ${imageCanvas.canvas.width}x${imageCanvas.canvas.height} 数据流。`,
           },
         };
       }
-      const service0c = this.buildService0cFromImage(prepared.buffer, { fitMode, dither, resample, renderPreset, renderScale, canvas: imageCanvas.canvas });
+      const service0c = this.buildService0cFromImage(prepared.buffer, { fitMode, dither, resample, renderPreset, renderScale, imageRotate, imageFlip, canvas: imageCanvas.canvas });
       const service0cB64 = service0c.toString('base64');
       if (this.parseBoolean(body.dryRun, false)) {
         return {
@@ -876,6 +895,8 @@ export class OfficialApiService {
           resample,
           renderPreset,
           renderScale,
+          imageRotate,
+          imageFlip,
           canvasPreset: body.canvasPreset ?? `0c:${imageCanvas.canvas.width}x${imageCanvas.canvas.height}`,
           canvas: imageCanvas.canvas,
           imageSha256: createHash('sha256').update(prepared.buffer).digest('hex'),
@@ -895,6 +916,8 @@ export class OfficialApiService {
         resample,
         renderPreset,
         renderScale,
+        imageRotate,
+        imageFlip,
         canvasPreset: body.canvasPreset ?? `0c:${imageCanvas.canvas.width}x${imageCanvas.canvas.height}`,
         canvas: imageCanvas.canvas,
         imageSha256: createHash('sha256').update(prepared.buffer).digest('hex'),
@@ -1368,7 +1391,7 @@ export class OfficialApiService {
 
   private parseRenderPreset(value: string | undefined) {
     const normalized = String(value || '').trim();
-    const supported = new Set(['2.13', '1.54', '2.90', '4.2', '5.83', '3.7', '7.5', '2.6', '10.2']);
+    const supported = new Set(['2.13', '1.54', '2.90', '4.2', '5.83', '3.7', '7.5', '2.6', '10.2', '128x250', '128x296', '152x296', '184x384', '200x200', '240x416', '256x250', '368x192']);
     return supported.has(normalized) ? normalized : '2.13';
   }
 
@@ -1390,10 +1413,18 @@ export class OfficialApiService {
   private getRenderPresetDimensions(preset: string) {
     const map: Record<string, { width: number; height: number }> = {
       '1.54': { width: 200, height: 200 },
+      '128x250': { width: 128, height: 250 },
+      '128x296': { width: 128, height: 296 },
+      '152x296': { width: 152, height: 296 },
       '2.13': { width: 250, height: 122 },
+      '184x384': { width: 184, height: 384 },
+      '200x200': { width: 200, height: 200 },
+      '240x416': { width: 240, height: 416 },
+      '256x250': { width: 256, height: 250 },
       '2.6': { width: 360, height: 184 },
       '2.90': { width: 296, height: 128 },
       '3.7': { width: 416, height: 240 },
+      '368x192': { width: 368, height: 192 },
       '4.2': { width: 400, height: 300 },
       '5.83': { width: 648, height: 480 },
       '7.5': { width: 800, height: 480 },
@@ -1403,25 +1434,42 @@ export class OfficialApiService {
   }
 
   private parseImageCanvas(value?: string): {
-    protocol: '03' | '03_04' | '03_0a' | '0c';
+    protocol: '03' | '03_01' | '03_02' | '03_03' | '03_04' | '03_0a' | '0c';
     canvas: { width: number; height: number; rowBytes: number; outputRows: number; outputBytes: number };
+    paletteCodes?: { black: number; yellow: number; red: number; white: number };
   } {
     let normalized = String(value || '').trim().toLowerCase();
     if (!normalized || normalized === '0c_800x480' || normalized === 'service0c' || normalized === '800x480_0c') {
       normalized = '0c:800x480';
     }
-    const explicit = normalized.match(/^(03-04|03_04|0304|03-0a|03_0a|030a|03|0c)[:_](.+)$/);
+    const explicit = normalized.match(/^(03-01|03_01|0301|03-02|03_02|0302|03-03|03_03|0303|03-04|03_04|0304|03-0a|03_0a|030a|03|0c)[:_](.+)$/);
     const protocol = explicit
       ? (
-        ['03-04', '03_04', '0304'].includes(explicit[1])
-          ? '03_04'
-          : ['03-0a', '03_0a', '030a'].includes(explicit[1])
-            ? '03_0a'
-            : explicit[1]
-      ) as '03' | '03_04' | '03_0a' | '0c'
+        ['03-01', '03_01', '0301'].includes(explicit[1])
+          ? '03_01'
+          : ['03-02', '03_02', '0302'].includes(explicit[1])
+            ? '03_02'
+            : ['03-03', '03_03', '0303'].includes(explicit[1])
+              ? '03_03'
+              : ['03-04', '03_04', '0304'].includes(explicit[1])
+                ? '03_04'
+                : ['03-0a', '03_0a', '030a'].includes(explicit[1])
+                  ? '03_0a'
+                  : explicit[1]
+      ) as '03' | '03_01' | '03_02' | '03_03' | '03_04' | '03_0a' | '0c'
       : '03';
     const spec = explicit ? explicit[2] : normalized;
-    const match = spec.match(/^(\d{2,4})x(\d{2,4})(?:@(\d{1,4})x(\d{1,4}))?$/);
+    const [sizeSpec, paletteSpec] = spec.split('#', 2);
+    const paletteMatch = paletteSpec?.match(/^b([0-3])y([0-3])r([0-3])w([0-3])$/);
+    const paletteCodes = paletteMatch
+      ? {
+        black: Number(paletteMatch[1]),
+        yellow: Number(paletteMatch[2]),
+        red: Number(paletteMatch[3]),
+        white: Number(paletteMatch[4]),
+      }
+      : undefined;
+    const match = sizeSpec.match(/^(\d{2,4})x(\d{2,4})(?:@(\d{1,4})x(\d{1,4}))?$/);
     if (!match) {
       return {
         protocol: '0c',
@@ -1447,7 +1495,7 @@ export class OfficialApiService {
         canvas: { width: 800, height: 480, rowBytes: 200, outputRows: 480, outputBytes: 96000 },
       };
     }
-    return { protocol, canvas: { width, height, rowBytes, outputRows, outputBytes: rowBytes * outputRows } };
+    return { protocol, canvas: { width, height, rowBytes, outputRows, outputBytes: rowBytes * outputRows }, paletteCodes };
   }
 
   private parseRenderScale(value: number | string | undefined) {
@@ -1456,6 +1504,20 @@ export class OfficialApiService {
       return 1;
     }
     return Math.min(1, Math.max(0.2, numeric));
+  }
+
+  private parseImageRotate(value: string | undefined): 'none' | 'cw90' | 'ccw90' | '180' {
+    if (value === 'cw90' || value === 'ccw90' || value === '180') {
+      return value;
+    }
+    return 'none';
+  }
+
+  private parseImageFlip(value: string | undefined): 'none' | 'horizontal' | 'vertical' | 'both' {
+    if (value === 'horizontal' || value === 'vertical' || value === 'both') {
+      return value;
+    }
+    return 'none';
   }
 
   private normalizeFitModes(values?: Array<'stretch' | 'contain_black' | 'contain_white' | 'cover'>, fastMode = true) {
@@ -2020,7 +2082,11 @@ export class OfficialApiService {
       resample?: 'nearest' | 'bilinear' | 'bicubic' | 'lanczos';
       renderPreset?: string;
       renderScale?: number;
+      imageRotate?: 'none' | 'cw90' | 'ccw90' | '180';
+      imageFlip?: 'none' | 'horizontal' | 'vertical' | 'both';
       canvas?: { width: number; height: number; rowBytes: number; outputRows: number; outputBytes: number };
+      paletteMode?: 'service0c' | 'service03_2bpp';
+      paletteCodes?: { black: number; yellow: number; red: number; white: number };
     },
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'esl-service0c-'));
@@ -2037,8 +2103,18 @@ export class OfficialApiService {
           'from PIL import Image',
           'from PIL import ImageOps',
           'import sys',
-          'inp, out, fit_mode, dither_mode, resample_name, render_scale, preset_w, preset_h, canvas_w, canvas_h, row_bytes, output_rows = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], float(sys.argv[6]), int(sys.argv[7]), int(sys.argv[8]), int(sys.argv[9]), int(sys.argv[10]), int(sys.argv[11]), int(sys.argv[12])',
+          'inp, out, fit_mode, dither_mode, resample_name, render_scale, rotate_mode, flip_mode, preset_w, preset_h, canvas_w, canvas_h, row_bytes, output_rows, palette_mode, black_code, yellow_code, red_code, white_code = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], float(sys.argv[6]), sys.argv[7], sys.argv[8], int(sys.argv[9]), int(sys.argv[10]), int(sys.argv[11]), int(sys.argv[12]), int(sys.argv[13]), int(sys.argv[14]), sys.argv[15], int(sys.argv[16]), int(sys.argv[17]), int(sys.argv[18]), int(sys.argv[19])',
           'img = Image.open(inp).convert("RGB")',
+          'if rotate_mode == "cw90":',
+          '  img = img.rotate(-90, expand=True)',
+          'elif rotate_mode == "ccw90":',
+          '  img = img.rotate(90, expand=True)',
+          'elif rotate_mode == "180":',
+          '  img = img.rotate(180, expand=True)',
+          'if flip_mode in ("horizontal", "both"):',
+          '  img = ImageOps.mirror(img)',
+          'if flip_mode in ("vertical", "both"):',
+          '  img = ImageOps.flip(img)',
           'resample_map = {"nearest": Image.Resampling.NEAREST, "bilinear": Image.Resampling.BILINEAR, "bicubic": Image.Resampling.BICUBIC, "lanczos": Image.Resampling.LANCZOS}',
           'resample = resample_map.get(resample_name, Image.Resampling.BILINEAR)',
           'target_size = (preset_w, preset_h)',
@@ -2063,14 +2139,22 @@ export class OfficialApiService {
           'img = canvas',
           'if dither_mode == "1":',
           '  pal = Image.new("P", (1,1))',
-          '  pal.putpalette([0,0,0,255,255,255,255,255,0,255,0,0] + [0,0,0]*252)',
+          '  if palette_mode == "service03_2bpp":',
+          '    pal.putpalette([0,0,0,255,255,0,255,0,0,255,255,255] + [0,0,0]*252)',
+          '  else:',
+          '    pal.putpalette([0,0,0,255,255,255,255,255,0,255,0,0] + [0,0,0]*252)',
           '  img = img.quantize(palette=pal, dither=Image.Dither.FLOYDSTEINBERG).convert("RGB")',
-          '# service0c: 2bpp。0x55 是白底，因此 white=1。',
-          'palette = [((0,0,0),0), ((255,255,255),1), ((255,255,0),2), ((255,0,0),3)]',
+          'if palette_mode == "service03_2bpp":',
+          '  palette = [((0,0,0),black_code), ((255,255,0),yellow_code), ((255,0,0),red_code), ((255,255,255),white_code)]',
+          '  default_code = white_code',
+          'else:',
+          '  # service0c: 2bpp。0x55 是白底，因此 white=1。',
+          '  palette = [((0,0,0),0), ((255,255,255),1), ((255,255,0),2), ((255,0,0),3)]',
+          '  default_code = 1',
           'pix = img.load()',
           'rows = bytearray()',
           'for y in range(output_rows):',
-          '  vals = [1] * (row_bytes * 4)',
+          '  vals = [default_code] * (row_bytes * 4)',
           '  if y < canvas_h:',
           '    for x in range(min(canvas_w, row_bytes * 4)):',
           '      r,g,b = pix[x,y]',
@@ -2086,12 +2170,19 @@ export class OfficialApiService {
         options?.dither ? '1' : '0',
         options?.resample || 'bilinear',
         String(options?.renderScale ?? 1),
+        options?.imageRotate || 'none',
+        options?.imageFlip || 'none',
         String(dims.width),
         String(dims.height),
         String(canvas.width),
         String(canvas.height),
         String(canvas.rowBytes),
         String(canvas.outputRows),
+        options?.paletteMode || 'service0c',
+        String(options?.paletteCodes?.black ?? 0),
+        String(options?.paletteCodes?.yellow ?? (options?.paletteMode === 'service03_2bpp' ? 1 : 2)),
+        String(options?.paletteCodes?.red ?? (options?.paletteMode === 'service03_2bpp' ? 2 : 3)),
+        String(options?.paletteCodes?.white ?? (options?.paletteMode === 'service03_2bpp' ? 3 : 1)),
       ], { stdio: 'pipe' });
       const rows = readFileSync(output);
       if (rows.length !== canvas.outputBytes) {
@@ -2111,6 +2202,8 @@ export class OfficialApiService {
       resample?: 'nearest' | 'bilinear' | 'bicubic' | 'lanczos';
       renderPreset?: string;
       renderScale?: number;
+      imageRotate?: 'none' | 'cw90' | 'ccw90' | '180';
+      imageFlip?: 'none' | 'horizontal' | 'vertical' | 'both';
       canvas?: { width: number; height: number; rowBytes: number; outputRows: number; outputBytes: number };
     },
   ) {
@@ -2138,11 +2231,17 @@ export class OfficialApiService {
       resample?: 'nearest' | 'bilinear' | 'bicubic' | 'lanczos';
       renderPreset?: string;
       renderScale?: number;
+      imageRotate?: 'none' | 'cw90' | 'ccw90' | '180';
+      imageFlip?: 'none' | 'horizontal' | 'vertical' | 'both';
       canvas?: { width: number; height: number; rowBytes: number; outputRows: number; outputBytes: number };
-      containerType?: 0x04 | 0x0a;
+      containerType?: 0x01 | 0x02 | 0x03 | 0x04 | 0x0a;
+      paletteCodes?: { black: number; yellow: number; red: number; white: number };
     },
   ) {
-    const rows = this.packImageToService0cRowsBytes(imageBuffer, options);
+    const rows = this.packImageToService0cRowsBytes(imageBuffer, {
+      ...options,
+      paletteMode: 'service03_2bpp',
+    });
     const chunks: Buffer[] = [];
     for (let offset = 0; offset < rows.length; offset += 8192) {
       chunks.push(rows.subarray(offset, Math.min(offset + 8192, rows.length)));
@@ -2166,6 +2265,8 @@ export class OfficialApiService {
       resample?: 'nearest' | 'bilinear' | 'bicubic' | 'lanczos';
       renderPreset?: string;
       renderScale?: number;
+      imageRotate?: 'none' | 'cw90' | 'ccw90' | '180';
+      imageFlip?: 'none' | 'horizontal' | 'vertical' | 'both';
       canvas?: { width: number; height: number; rowBytes: number; outputRows: number; outputBytes: number };
     },
   ) {
@@ -2181,8 +2282,18 @@ export class OfficialApiService {
           'from PIL import Image',
           'from PIL import ImageOps',
           'import sys',
-          'inp, out, fit_mode, dither_mode, resample_name, render_scale, target_w, target_h, row_bytes, output_rows = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], float(sys.argv[6]), int(sys.argv[7]), int(sys.argv[8]), int(sys.argv[9]), int(sys.argv[10])',
+          'inp, out, fit_mode, dither_mode, resample_name, render_scale, rotate_mode, flip_mode, target_w, target_h, row_bytes, output_rows = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], float(sys.argv[6]), sys.argv[7], sys.argv[8], int(sys.argv[9]), int(sys.argv[10]), int(sys.argv[11]), int(sys.argv[12])',
           'img = Image.open(inp).convert("RGB")',
+          'if rotate_mode == "cw90":',
+          '  img = img.rotate(-90, expand=True)',
+          'elif rotate_mode == "ccw90":',
+          '  img = img.rotate(90, expand=True)',
+          'elif rotate_mode == "180":',
+          '  img = img.rotate(180, expand=True)',
+          'if flip_mode in ("horizontal", "both"):',
+          '  img = ImageOps.mirror(img)',
+          'if flip_mode in ("vertical", "both"):',
+          '  img = ImageOps.flip(img)',
           'resample_map = {"nearest": Image.Resampling.NEAREST, "bilinear": Image.Resampling.BILINEAR, "bicubic": Image.Resampling.BICUBIC, "lanczos": Image.Resampling.LANCZOS}',
           'resample = resample_map.get(resample_name, Image.Resampling.BILINEAR)',
           'target_size = (target_w, target_h)',
@@ -2224,6 +2335,8 @@ export class OfficialApiService {
         options?.dither ? '1' : '0',
         options?.resample || 'bilinear',
         String(options?.renderScale ?? 1),
+        options?.imageRotate || 'none',
+        options?.imageFlip || 'none',
         String(dims.width),
         String(dims.height),
         String(dims.rowBytes),
@@ -2247,6 +2360,8 @@ export class OfficialApiService {
       resample?: 'nearest' | 'bilinear' | 'bicubic' | 'lanczos';
       renderPreset?: string;
       renderScale?: number;
+      imageRotate?: 'none' | 'cw90' | 'ccw90' | '180';
+      imageFlip?: 'none' | 'horizontal' | 'vertical' | 'both';
       canvas?: { width: number; height: number; rowBytes: number; outputRows: number; outputBytes: number };
     },
   ) {
