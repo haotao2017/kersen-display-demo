@@ -108,6 +108,8 @@ type SendImage4515FileLocalGeneratedBody = SendImage4515FileBody & {
   renderScale?: number | string;
   imageRotate?: 'none' | 'cw90' | 'ccw90' | '180';
   imageFlip?: 'none' | 'horizontal' | 'vertical' | 'both';
+  imageLed?: boolean | string;
+  ledB64dat?: string;
   dryRun?: boolean | string;
 };
 
@@ -748,6 +750,7 @@ export class OfficialApiService {
       const imageRotate = this.parseImageRotate(body.imageRotate);
       const imageFlip = this.parseImageFlip(body.imageFlip);
       const imageCanvas = this.parseImageCanvas(body.canvasPreset);
+      const ledB64dat = this.parseBoolean(body.imageLed, false) ? String(body.ledB64dat || 'AGQAZP8sAQ==') : undefined;
       if (imageCanvas.protocol === '03') {
         const service03Canvas = imageCanvas.canvas;
         const service03 = this.buildSmallService03FromImage(prepared.buffer, {
@@ -787,7 +790,7 @@ export class OfficialApiService {
             },
           };
         }
-        const downlinkPayload = this.buildReadWriteSvcPayloadForService(body.eslCode, '01-00-00-03', service03B64, { bigsize: false });
+        const downlinkPayload = this.buildReadWriteSvcPayloadForService(body.eslCode, '01-00-00-03', service03B64, { bigsize: false, ledB64dat });
         const replay = this.apWebsocket.sendRaw(body.apId, downlinkPayload);
         return {
           ok: replay.ok,
@@ -855,7 +858,7 @@ export class OfficialApiService {
             },
           };
         }
-        const downlinkPayload = this.buildReadWriteSvcPayloadForService(body.eslCode, '01-00-00-03', service0304B64, { bigsize: false });
+        const downlinkPayload = this.buildReadWriteSvcPayloadForService(body.eslCode, '01-00-00-03', service0304B64, { bigsize: false, ledB64dat });
         const replay = this.apWebsocket.sendRaw(body.apId, downlinkPayload);
         return {
           ok: replay.ok,
@@ -904,7 +907,7 @@ export class OfficialApiService {
           generatedService0cSha256: createHash('sha256').update(service0c).digest('hex'),
         };
       }
-      const downlinkPayload = this.buildReadWriteSvcPayloadForService(body.eslCode, '01-00-00-0c', service0cB64, { supersize: true });
+      const downlinkPayload = this.buildReadWriteSvcPayloadForService(body.eslCode, '01-00-00-0c', service0cB64, { supersize: true, ledB64dat });
       const replay = this.apWebsocket.sendRaw(body.apId, downlinkPayload);
       return {
         ok: replay.ok,
@@ -1006,6 +1009,7 @@ export class OfficialApiService {
     const renderPreset = this.parseRenderPreset(body.renderPreset);
     const renderScale = this.parseRenderScale(body.renderScale);
     const dryRun = this.parseBoolean(body.dryRun, false);
+    const ledB64dat = this.parseBoolean(body.imageLed, false) ? String(body.ledB64dat || 'AGQAZP8sAQ==') : undefined;
     const needsBaseline = mode !== 'f2slot';
     const seed = (sendMode === 'replay' || needsBaseline) ? this.pickReplaySeedCapture(body.apId, body.seedCaptureId) : undefined;
     if ((sendMode === 'replay' || needsBaseline) && !seed?.text) {
@@ -1051,7 +1055,7 @@ export class OfficialApiService {
         )
     );
     const replacementService03B64 = rebuilt.toString('base64');
-    const downlinkPayload = this.buildReadWriteSvcPayload(body.eslCode, replacementService03B64);
+    const downlinkPayload = this.buildReadWriteSvcPayloadForService(body.eslCode, '01-00-00-03', replacementService03B64, { bigsize: false, ledB64dat });
     if (dryRun) {
       return {
         ok: true,
@@ -1077,6 +1081,7 @@ export class OfficialApiService {
           type: 'READ_WRITE_SVC',
           opas: downlinkPayload.opas.length,
           service: '01-00-00-03',
+          ledService: ledB64dat ? '01-00-00-07' : undefined,
           b64Chars: replacementService03B64.length,
         },
       };
@@ -1391,7 +1396,7 @@ export class OfficialApiService {
 
   private parseRenderPreset(value: string | undefined) {
     const normalized = String(value || '').trim();
-    const supported = new Set(['2.13', '1.54', '2.90', '4.2', '5.83', '3.7', '7.5', '2.6', '10.2', '128x250', '128x296', '152x296', '184x384', '200x200', '240x416', '256x250', '368x192']);
+    const supported = new Set(['2.13', '1.54', '2.90', '4.2', '5.83', '3.7', '7.5', '2.6', '10.2', '128x250', '128x296', '152x296', '184x384', '200x200', '240x416', '256x250', '368x192', '648x480', '680x480']);
     return supported.has(normalized) ? normalized : '2.13';
   }
 
@@ -1427,6 +1432,8 @@ export class OfficialApiService {
       '368x192': { width: 368, height: 192 },
       '4.2': { width: 400, height: 300 },
       '5.83': { width: 648, height: 480 },
+      '648x480': { width: 648, height: 480 },
+      '680x480': { width: 680, height: 480 },
       '7.5': { width: 800, height: 480 },
       '10.2': { width: 960, height: 640 },
     };
@@ -2498,8 +2505,9 @@ export class OfficialApiService {
     eslCode: string,
     service: '01-00-00-03' | '01-00-00-0c',
     b64dat: string,
-    flags?: { bigsize?: boolean; supersize?: boolean },
+    flags?: { bigsize?: boolean; supersize?: boolean; ledB64dat?: string },
   ) {
+    const imageCmdId = flags?.ledB64dat ? 1 : 16;
     return {
       type: 'READ_WRITE_SVC',
       opas: [
@@ -2508,13 +2516,19 @@ export class OfficialApiService {
           cmds: [
             { id: 0, type: 'CONN_DEV' },
             {
-              id: 16,
+              id: imageCmdId,
               type: 'WRITE_SVC',
               ...(flags?.supersize ? { supersize: true } : { bigsize: flags?.bigsize ?? false }),
               mtu: 10000,
               service,
               b64dat,
             },
+            ...(flags?.ledB64dat ? [{
+              id: 16,
+              type: 'WRITE_SVC',
+              service: '01-00-00-07',
+              b64dat: flags.ledB64dat,
+            }] : []),
           ],
         },
       ],

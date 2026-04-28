@@ -526,7 +526,25 @@ export class LabelsController {
         data.led = this.buildLedParams(params, queueId);
       }
       command = { type: 'ESL_WRITE', data };
-    } else if (commandType === 'led' || commandType === 'stop_led') {
+    } else if (commandType === 'led') {
+      command = {
+        type: 'READ_WRITE_SVC',
+        opas: [
+          {
+            addr: eslCode,
+            cmds: [
+              { id: 0, type: 'CONN_DEV' },
+              {
+                id: 16,
+                type: 'WRITE_SVC',
+                service: '01-00-00-07',
+                b64dat: this.readString(params.led_b64dat, 'ZAAAAf88AA=='),
+              },
+            ],
+          },
+        ],
+      };
+    } else if (commandType === 'stop_led') {
       command = {
         type: 'ESL_WRITE',
         data: {

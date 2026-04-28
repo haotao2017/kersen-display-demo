@@ -717,82 +717,98 @@ const commandTypes = [
   { value: 'raw', label: '原始 JSON' },
 ];
 
-const DEFAULT_IMAGE_TEST_AP_ID = 'e4:38:19:2a:09:de';
-const LABEL_SIZE_OPTIONS = [
-  { value: '2.13', label: '2.13 英寸' },
-  { value: '128x250', label: '128x250（15403FCA 竖屏黑白）' },
-  { value: '200x200', label: '200x200（1700009F 方屏测试）' },
-  { value: '240x416', label: '240x416（17500175 竖屏测试）' },
-  { value: '256x250', label: '256x250（1710408C 黑白测试）' },
-  { value: '184x384', label: '184x384（174004d2 竖屏测试）' },
-  { value: '128x296', label: '128x296（173014D6 竖屏测试）' },
-  { value: '152x296', label: '152x296（17200227 竖屏测试）' },
-  { value: '1.54', label: '1.54 英寸' },
-  { value: '2.90', label: '2.90 英寸' },
-  { value: '4.2', label: '4.2 英寸' },
-  { value: '5.83', label: '5.83 英寸' },
-  { value: '3.7', label: '3.7 英寸' },
-  { value: '7.5', label: '7.5 英寸' },
-  { value: '2.6', label: '2.6 英寸' },
-  { value: '10.2', label: '10.2 英寸' },
+const IMAGE_TEST_TAG_ACTIONS = [
+  { value: 'led', label: '闪灯' },
+  { value: 'stop_led', label: '停止闪灯' },
+  { value: 'refresh', label: '刷新数据' },
+  { value: 'white', label: '刷白屏' },
+  { value: 'image_led', label: '刷图并闪灯（上方图片）' },
+  { value: 'ndef', label: '写 NDEF' },
+  { value: 'ota', label: '价签 OTA' },
+  { value: 'group_change', label: '换组' },
 ] as const;
 
-const CANVAS_SIZE_PRESETS = [
-  { value: '800x480', label: '800x480（7.5/大屏）' },
-  { value: '200x160', label: '200x160（1.54 候选）' },
-  { value: '200x200', label: '200x200（1.54/方屏）' },
-  { value: '152x152', label: '152x152（1.54 方屏候选）' },
-  { value: '250x122', label: '250x122（2.13 候选）' },
-  { value: '250x122@32x125', label: '250x122 stride32 total4000（重叠排查）' },
-  { value: '250x125@32x125', label: '250x125 stride32 total4000' },
-  { value: '250x128@32x128', label: '250x128 stride32 total4096' },
-  { value: '256x122@32x125', label: '256x122 stride32 total4000' },
-  { value: '256x125', label: '256x125 total4000' },
-  { value: '256x128', label: '256x128 total4096' },
-  { value: '212x104', label: '212x104（2.13 候选）' },
-  { value: '296x128', label: '296x128（2.9 常见）' },
-  { value: '296x152', label: '296x152（2.9/2.66 候选）' },
-  { value: '296x160', label: '296x160（2.9 候选）' },
-  { value: '360x184', label: '360x184（2.6/2.7 候选）' },
-  { value: '300x200', label: '300x200（2.7/3.0 候选）' },
-  { value: '400x300', label: '400x300（4.2 常见）' },
-  { value: '416x240', label: '416x240（3.7 常见）' },
-  { value: '648x480', label: '648x480（5.83 常见）' },
+const IMAGE_TEST_AP_ACTIONS = [
+  { value: 'ap_svc_cfg', label: '服务配置' },
+  { value: 'ap_psm', label: 'PSM/休眠' },
+  { value: 'ap_restart', label: '程序重启' },
+  { value: 'ap_reboot', label: '系统重启' },
+  { value: 'ap_channels', label: '获取通道' },
+  { value: 'ap_ota', label: '基站 OTA' },
+] as const;
+
+const DEFAULT_IMAGE_TEST_AP_ID = 'e4:38:19:2a:09:de';
+const TAG_SIZE_LABELS: Record<string, string> = {
+  '17900170': '0C 800x480',
+  '176002f7': '03-04 400x300',
+  '1770008e': '03-0A 648x480',
+  '17500175': '03-04 240x416',
+  '174004d2': '03-03 184x384',
+  '173014d6': '03-02 128x296',
+  '17200227': '03-02 152x296',
+  '15403fca': '03/03-02 128x250',
+  '1710408c': '03-01 128x250',
+  '1700009f': '03-02 200x200',
+};
+
+function labelOptionText(label: Label) {
+  const size = TAG_SIZE_LABELS[label.id.toLowerCase()];
+  return `${label.id} · ${label.title}${size ? ` · ${size}` : ''}`;
+}
+
+const LABEL_SIZE_OPTIONS = [
+  { value: '2.13', label: '2.13 英寸（250x122）' },
+  { value: '128x250', label: '1.54/2.13 竖屏（128x250，15403FCA/1710408C）' },
+  { value: '200x200', label: '1.54 英寸方屏（200x200，1700009F）' },
+  { value: '240x416', label: '3.7 竖屏（240x416，17500175）' },
+  { value: '256x250', label: '1710408C 误解读候选（256x250）' },
+  { value: '184x384', label: '174004d2 竖屏（184x384）' },
+  { value: '128x296', label: '2.90 竖屏（128x296，173014D6）' },
+  { value: '152x296', label: '2.90/2.66 竖屏（152x296，17200227）' },
+  { value: '648x480', label: '5.83 英寸（648x480，1770008E）' },
+  { value: '680x480', label: '5.83 候选（680x480，1770008E 易乱码）' },
+  { value: '1.54', label: '1.54 英寸（200x200）' },
+  { value: '2.90', label: '2.90 英寸（296x128）' },
+  { value: '4.2', label: '4.2 英寸（400x300）' },
+  { value: '5.83', label: '5.83 英寸（648x480）' },
+  { value: '3.7', label: '3.7 英寸（416x240）' },
+  { value: '7.5', label: '7.5 英寸（800x480）' },
+  { value: '2.6', label: '2.6 英寸（360x184）' },
+  { value: '10.2', label: '10.2 英寸（960x640）' },
 ] as const;
 
 const IMAGE_CANVAS_OPTIONS = [
-  { value: '03-02:200x200#b0y1r2w3', label: '03-02 200x200（1700009F/4518 官方匹配，b0/y1/r2/w3）' },
-  { value: '03-02:200x200#b0y2r3w1', label: '03-02 200x200（1700009F/4518，实测色码备选 b0/y2/r3/w1）' },
-  { value: '03-02:200x200', label: '03-02 200x200（1700009F/4518，默认 b0/y1/r2/w3）' },
-  { value: '03-01:128x250#b0y2r3w1', label: '03-01 128x250（1710408C/4518，按实测修正 b0/y2/r3/w1）' },
-  { value: '03-01:128x250#b0y1r2w3', label: '03-01 128x250（1710408C/4518 官方匹配，2bpp b0/y1/r2/w3）' },
-  { value: '03:256x250', label: '03 256x250（1710408C/4518，误按 1bpp 解读，仅黑白）' },
-  { value: '03-02:256x250#b0y2r3w1', label: '03-02 256x250（1710408C 彩色实验，b0/y2/r3/w1）' },
-  { value: '03-02:256x250', label: '03-02 256x250（1710408C 彩色实验，默认 b0/y1/r2/w3）' },
-  { value: '03:128x250', label: '03 128x250（15403FCA/4518 官方匹配，1bpp）' },
-  { value: '03-02:128x250#b0y2r3w1', label: '03-02 128x250（15403FCA 彩色实验，b0/y2/r3/w1）' },
-  { value: '03-02:128x250', label: '03-02 128x250（15403FCA 彩色实验，默认 b0/y1/r2/w3）' },
-  { value: '03-02:152x296#b0y2r3w1', label: '03-02 152x296（17200227/4518，按实测修正 b0/y2/r3/w1）' },
-  { value: '03-02:152x296', label: '03-02 152x296（17200227/4518，默认 b0/y1/r2/w3）' },
-  { value: '03-02:128x296#b0y2r3w1', label: '03-02 128x296（173014D6/4518，按实测修正 b0/y2/r3/w1）' },
-  { value: '03-02:128x296', label: '03-02 128x296（173014D6/4518，默认 b0/y1/r2/w3）' },
-  { value: '03-03:184x384#b0y1r2w3', label: '03-03 184x384（174004d2/4518，官方色码 b0/y1/r2/w3）' },
-  { value: '03-03:184x384#b0y2r3w1', label: '03-03 184x384（174004d2/4518，按实测修正 b0/y2/r3/w1）' },
-  { value: '03-03:184x384', label: '03-03 184x384（174004d2/4518，默认 b0/y1/r2/w3）' },
-  { value: '03-0a:648x480', label: '03-0A 648x480（1770008e/4518 官方匹配）' },
-  { value: '03-04:240x416#b0y1r2w3', label: '03-04 240x416（17500175/4518 官方匹配，b0/y1/r2/w3）' },
-  { value: '03-04:240x416#b0y2r3w1', label: '03-04 240x416（17500175/4518，实测色码备选 b0/y2/r3/w1）' },
-  { value: '03-04:400x300', label: '03-04 400x300（176002f7/4518 官方匹配）' },
-  ...CANVAS_SIZE_PRESETS.flatMap((item) => [
-    { value: `03:${item.value}`, label: `03 ${item.label}` },
-    { value: `03-01:${item.value}`, label: `03-01 ${item.label}` },
-    { value: `03-02:${item.value}`, label: `03-02 ${item.label}` },
-    { value: `03-04:${item.value}`, label: `03-04 ${item.label}` },
-    { value: `03-0a:${item.value}`, label: `03-0A ${item.label}` },
-    { value: `0c:${item.value}`, label: `0C ${item.label}` },
-  ]),
-  { value: 'custom', label: '自定义类型和尺寸' },
+  { value: '0c:800x480', label: '17900170 0C 800x480（官方匹配）' },
+  { value: '03-04:400x300#b0y2r3w1', label: '176002f7 03-04 400x300（实测修正）' },
+  { value: '03-0a:648x480#b0y2r3w1', label: '1770008E 03-0A 648x480（实测修正，680x480 会乱码）' },
+  { value: '03-04:240x416#b0y2r3w1', label: '17500175 03-04 240x416（实测色码 + 旋转 + 镜像）' },
+  { value: '03-03:184x384#b0y2r3w1', label: '174004d2 03-03 184x384（实测 + 旋转）' },
+  { value: '03-02:128x296#b0y2r3w1', label: '173014D6 03-02 128x296（实测 + 水平镜像 + 旋转）' },
+  { value: '03-02:152x296#b0y2r3w1', label: '17200227 03-02 152x296（实测 + 水平镜像 + 旋转）' },
+  { value: '03:128x250', label: '15403FCA 03 128x250（原始黑白 1bpp + 旋转）' },
+  { value: '03-01:128x250#b0y2r3w1', label: '1710408C 03-01 128x250（实测 + 旋转）' },
+  { value: '03-02:200x200#b0y2r3w1', label: '1700009F 03-02 200x200（实测 + 旋转）' },
 ] as const;
+
+type ImageRotate = 'none' | 'cw90' | 'ccw90' | '180';
+type ImageFlip = 'none' | 'horizontal' | 'vertical' | 'both';
+
+const IMAGE_CANVAS_STRATEGIES: Record<string, { imageRotate: ImageRotate; imageFlip: ImageFlip; note: string }> = {
+  '0c:800x480': { imageRotate: 'none', imageFlip: 'none', note: '默认方向' },
+  '03-04:400x300#b0y2r3w1': { imageRotate: 'none', imageFlip: 'none', note: '实测色码' },
+  '03-0a:648x480#b0y2r3w1': { imageRotate: 'none', imageFlip: 'none', note: '实测色码' },
+  '03-04:240x416#b0y2r3w1': { imageRotate: 'cw90', imageFlip: 'horizontal', note: '实测色码 + 顺时针90度 + 水平镜像' },
+  '03-03:184x384#b0y2r3w1': { imageRotate: 'cw90', imageFlip: 'none', note: '实测色码 + 顺时针90度' },
+  '03-02:128x296#b0y2r3w1': { imageRotate: 'cw90', imageFlip: 'horizontal', note: '实测色码 + 顺时针90度 + 水平镜像' },
+  '03-02:152x296#b0y2r3w1': { imageRotate: 'cw90', imageFlip: 'horizontal', note: '实测色码 + 顺时针90度 + 水平镜像' },
+  '03:128x250': { imageRotate: 'cw90', imageFlip: 'none', note: '原始黑白 + 顺时针90度' },
+  '03-01:128x250#b0y2r3w1': { imageRotate: 'cw90', imageFlip: 'none', note: '实测色码 + 顺时针90度' },
+  '03-02:200x200#b0y2r3w1': { imageRotate: 'cw90', imageFlip: 'none', note: '实测色码 + 顺时针90度' },
+};
+
+function strategyForCanvasPreset(canvasPreset: string) {
+  return IMAGE_CANVAS_STRATEGIES[canvasPreset] ?? { imageRotate: 'none' as ImageRotate, imageFlip: 'none' as ImageFlip, note: '手动策略' };
+}
 
 const IMAGE_ROTATE_OPTIONS = [
   { value: 'none', label: '不旋转' },
@@ -976,8 +992,10 @@ function App() {
     customCanvasRowBytes: '',
     customCanvasOutputRows: '',
     renderScale: '1',
-    imageRotate: 'none' as 'none' | 'cw90' | 'ccw90' | '180',
-    imageFlip: 'none' as 'none' | 'horizontal' | 'vertical' | 'both',
+    imageRotate: 'none' as ImageRotate,
+    imageFlip: 'none' as ImageFlip,
+    imageLed: false,
+    ledB64dat: 'AGQAZP8sAQ==',
     dryRun: false,
     topN: 8,
   });
@@ -985,6 +1003,9 @@ function App() {
   const [imageTestRunning, setImageTestRunning] = React.useState(false);
   const [imageTestStatus, setImageTestStatus] = React.useState('未执行');
   const [imageTestResult, setImageTestResult] = React.useState<LocalImageTestResult | null>(null);
+  const [imageActionRunning, setImageActionRunning] = React.useState('');
+  const [imageActionStatus, setImageActionStatus] = React.useState('未执行');
+  const [imageActionResult, setImageActionResult] = React.useState<DocumentCommandResult | null>(null);
 
   const commandLogs = React.useMemo(() => {
     const interesting = [
@@ -1002,6 +1023,33 @@ function App() {
       .filter((log) => interesting.some((item) => `${log.method} ${log.path}`.startsWith(item) || log.method.startsWith(item)))
       .slice(0, 18);
   }, [logs]);
+
+  const latestApQueueStatus = React.useMemo(() => {
+    for (const log of commandLogs) {
+      if (log.method !== 'AP-QUEUE-STATUS') {
+        continue;
+      }
+      const body = asObject(log.body);
+      if (!body || (body.apId && body.apId !== imageTestForm.apId)) {
+        continue;
+      }
+      const rest = Number(body.rw_task_rest);
+      return {
+        rest: Number.isFinite(rest) ? rest : undefined,
+        time: log.time,
+        recentDownlinks: Array.isArray(body.recentDownlinks) ? body.recentDownlinks.length : undefined,
+      };
+    }
+    return undefined;
+  }, [commandLogs, imageTestForm.apId]);
+
+  const latestImageTraceInsight = React.useMemo(() => {
+    const latest = downlinkTraces.find((trace) => (
+      trace.apId === imageTestForm.apId
+      && (!trace.labelId || !imageTestForm.eslCode || trace.labelId === imageTestForm.eslCode)
+    ));
+    return latest ? summarizeTraceInsight(latest) : null;
+  }, [downlinkTraces, imageTestForm.apId, imageTestForm.eslCode]);
 
   const service03Insights = React.useMemo<Service03Insights>(() => {
     const ordered = [...service03Samples]
@@ -1166,11 +1214,12 @@ function App() {
     setAps(apsResult);
     setLabels(labelsResult);
     setMqttStats(mqttResult);
+    const firstRealLabel = labelsResult.find((label) => !looksLikeDemoEslCode(label.id));
     setSelectedApId((current) => current || apsResult.find((ap) => ap.status === 'online')?.id || apsResult[0]?.id || '');
     setDocCommand((current) => ({
       ...current,
       apId: current.apId || apsResult.find((ap) => ap.status === 'online')?.id || apsResult[0]?.id || '',
-      labelId: current.labelId || labelsResult[0]?.id || '',
+      labelId: current.labelId && !looksLikeDemoEslCode(current.labelId) ? current.labelId : firstRealLabel?.id || '',
     }));
     setMessage(`刷新完成：${new Date().toLocaleTimeString()}`);
     void refreshLabelRenders(labelsResult);
@@ -2100,7 +2149,7 @@ function App() {
     setMessage(`图片已转换为 296x128 PNG：${file.name}`);
   }
 
-  function documentParams() {
+  function documentParams(commandType = docCommand.commandType, overrides: Record<string, unknown> = {}) {
     const params: Record<string, unknown> = {
       esl_code: docCommand.labelId,
       queue_id: docCommand.queue_id ? Number(docCommand.queue_id) : undefined,
@@ -2140,9 +2189,10 @@ function App() {
       parallel_num: Number(docCommand.parallel_num),
       ap_chn_num: Number(docCommand.ap_chn_num),
       pre_psm: docCommand.prePsm,
+      ...overrides,
     };
 
-    if (docCommand.commandType === 'raw') {
+    if (commandType === 'raw') {
       try {
         params.raw = JSON.parse(docCommand.raw);
       } catch {
@@ -2150,6 +2200,28 @@ function App() {
       }
     }
     return params;
+  }
+
+  async function sendDocumentCommandRequest(options: {
+    commandType: string;
+    labelId: string;
+    apId: string;
+    params?: Record<string, unknown>;
+    delivery?: { mqtt?: boolean; websocket?: boolean };
+  }) {
+    return api<DocumentCommandResult>(`/api/labels/${encodeURIComponent(options.labelId)}/document-command`, {
+      method: 'POST',
+      body: JSON.stringify({
+        storeCode,
+        commandType: options.commandType,
+        apId: options.apId,
+        params: options.params ?? documentParams(options.commandType),
+        delivery: {
+          mqtt: options.delivery?.mqtt ?? docCommand.sendMqtt,
+          websocket: options.delivery?.websocket ?? docCommand.sendWs,
+        },
+      }),
+    });
   }
 
   async function sendDocumentCommand() {
@@ -2160,18 +2232,11 @@ function App() {
     }
     setMessage('正在发送文档指令...');
     try {
-      const result = await api<DocumentCommandResult>(`/api/labels/${encodeURIComponent(labelId)}/document-command`, {
-        method: 'POST',
-        body: JSON.stringify({
-          storeCode,
-          commandType: docCommand.commandType,
-          apId: docCommand.apId,
-          params: documentParams(),
-          delivery: {
-            mqtt: docCommand.sendMqtt,
-            websocket: docCommand.sendWs,
-          },
-        }),
+      const result = await sendDocumentCommandRequest({
+        commandType: docCommand.commandType,
+        labelId,
+        apId: docCommand.apId,
+        params: documentParams(docCommand.commandType),
       });
       setDocResult(result);
       setMessage(`${result.ok ? '已发送' : '未发送'}：${result.protocol?.topic ?? result.reason ?? '-'}`);
@@ -2183,7 +2248,77 @@ function App() {
     }
   }
 
-  async function runLocalImageRenderTest() {
+  function imageActionNeedsConfirmation(commandType: string) {
+    return commandType === 'ap_restart'
+      || commandType === 'ap_reboot'
+      || commandType === 'ap_ota'
+      || (commandType === 'ap_psm' && docCommand.psmMode === 'sleep');
+  }
+
+  function imageActionParams(commandType: string) {
+    return documentParams(commandType, {
+      esl_code: imageTestForm.eslCode,
+      source: commandType === 'image_led' || commandType === 'refresh' ? docCommand.source : '',
+      pre_psm: commandType === 'white' || commandType === 'image_led' ? docCommand.prePsm : false,
+    });
+  }
+
+  async function sendImageTestDocumentCommand(commandType: string, label: string) {
+    if (commandType === 'image_led') {
+      setImageActionRunning(commandType);
+      try {
+        await runLocalImageRenderTest({ imageLed: true });
+      } finally {
+        setImageActionRunning('');
+      }
+      return;
+    }
+    if (!imageTestForm.apId) {
+      setImageActionStatus('请先选择目标基站');
+      setMessage('请先选择目标基站');
+      return;
+    }
+    if (!imageTestForm.eslCode) {
+      setImageActionStatus('请先选择目标价签');
+      setMessage('请先选择目标价签');
+      return;
+    }
+    if (imageActionNeedsConfirmation(commandType)) {
+      const ok = window.confirm(`确认执行 ${label}？这个操作会影响基站或连接窗口。`);
+      if (!ok) {
+        return;
+      }
+    }
+
+    setImageActionRunning(commandType);
+    setImageActionStatus(`正在发送 ${label}...`);
+    setMessage(`正在发送 ${label}`);
+    try {
+      const result = await sendDocumentCommandRequest({
+        commandType,
+        labelId: imageTestForm.eslCode,
+        apId: imageTestForm.apId,
+        params: imageActionParams(commandType),
+      });
+      setImageActionResult(result);
+      const queuePart = result.protocol?.queueId ? `，queue_id=${result.protocol.queueId}` : '';
+      const nextStatus = result.ok
+        ? `${label} 已发送${queuePart}`
+        : `${label} 未发送：${result.reason ?? '未知原因'}`;
+      setImageActionStatus(nextStatus);
+      setMessage(nextStatus);
+      await Promise.all([refreshLogs(), refreshDownlinkTraces(imageTestForm.apId), refreshWsStatus()]);
+    } catch (error) {
+      const text = error instanceof Error ? error.message : '未知错误';
+      setImageActionStatus(text);
+      setMessage(text);
+      setImageActionResult({ ok: false, reason: text, commandType });
+    } finally {
+      setImageActionRunning('');
+    }
+  }
+
+  async function runLocalImageRenderTest(options?: { imageLed?: boolean }) {
     if (!imageTestForm.apId) {
       setImageTestStatus('请先选择目标基站');
       setMessage('请先选择目标基站');
@@ -2201,7 +2336,8 @@ function App() {
     }
 
     setImageTestRunning(true);
-    setImageTestStatus(imageTestForm.dryRun ? '正在自动筛选最佳参数（dryRun）...' : '正在自动筛选并下发...');
+    const imageLed = options?.imageLed ?? imageTestForm.imageLed;
+    setImageTestStatus(imageTestForm.dryRun ? '正在自动筛选最佳参数（dryRun）...' : imageLed ? '正在生成图片并追加 LED 闪灯...' : '正在自动筛选并下发...');
     setMessage(`正在执行本地图片渲染测试：${imageTestFile?.name ?? imageTestForm.localImageName}`);
     try {
       const formData = new FormData();
@@ -2215,10 +2351,14 @@ function App() {
       formData.append('localImageName', imageTestForm.localImageName.trim());
       formData.append('fastMode', imageTestForm.fastMode ? 'true' : 'false');
       formData.append('renderPreset', imageTestForm.renderPreset);
-      formData.append('canvasPreset', buildCanvasPreset(imageTestForm));
+      const canvasPreset = buildCanvasPreset(imageTestForm);
+      const canvasStrategy = strategyForCanvasPreset(canvasPreset);
+      formData.append('canvasPreset', canvasPreset);
       formData.append('renderScale', imageTestForm.renderScale);
-      formData.append('imageRotate', imageTestForm.imageRotate);
-      formData.append('imageFlip', imageTestForm.imageFlip);
+      formData.append('imageRotate', canvasStrategy.imageRotate);
+      formData.append('imageFlip', canvasStrategy.imageFlip);
+      formData.append('imageLed', imageLed ? 'true' : 'false');
+      formData.append('ledB64dat', imageTestForm.ledB64dat);
       formData.append('dryRun', imageTestForm.dryRun ? 'true' : 'false');
       formData.append('topN', String(Math.max(1, Number(imageTestForm.topN) || 8)));
       if (imageTestFile) {
@@ -2232,7 +2372,7 @@ function App() {
       const statusText = result.ok
         ? imageTestForm.dryRun
           ? `已生成 dryRun 结果，参数：${result.fitMode ?? '-'} / ${result.resample ?? '-'} / dither=${String(result.dither)}`
-          : `已下发（待执行确认），tracking=${result.replay?.trackingId ?? '-'}，参数：${result.fitMode ?? '-'} / ${result.resample ?? '-'} / dither=${String(result.dither)}`
+          : `已下发${imageLed ? '（含 LED 闪灯）' : ''}（待执行确认），tracking=${result.replay?.trackingId ?? '-'}，参数：${result.fitMode ?? '-'} / ${result.resample ?? '-'} / dither=${String(result.dither)}`
         : `执行失败：${result.reason ?? result.message ?? '未知错误'}`;
       setImageTestStatus(statusText);
       setMessage(statusText);
@@ -2267,7 +2407,7 @@ function App() {
 
   async function callOfficialApiExperiment() {
     const eslCode = officialApi.eslCode || docCommand.labelId || labels[0]?.id || '';
-    const needsEslCode = ['direct', 'bind', 'search', 'query_status'].includes(officialApi.action);
+    const needsEslCode = ['direct', 'bind', 'bind_multiple', 'unbind', 'search', 'query_status'].includes(officialApi.action);
     if (needsEslCode && !eslCode) {
       setMessage('没有目标价签，无法调用官方 API 实验');
       return;
@@ -2306,6 +2446,15 @@ function App() {
       payload.f1 = eslCode;
       payload.f2 = officialApi.productCode;
       payload.f3 = String(officialApi.templateId);
+    } else if (officialApi.action === 'bind_multiple') {
+      payload.f1 = [{
+        esl_code: eslCode,
+        product_code: officialApi.productCode,
+        product_inner: officialApi.productCode,
+        template_id: String(officialApi.templateId),
+      }];
+    } else if (officialApi.action === 'unbind') {
+      payload.f1 = officialApi.resource === 'esl_ble' ? eslCode : [eslCode];
     } else if (officialApi.action === 'bind_task' || officialApi.action === 'sync') {
       // No extra fields.
     } else if (officialApi.action === 'search') {
@@ -2324,7 +2473,8 @@ function App() {
     }
 
     const targetApId = docCommand.apId || selectedCommandAp?.id || selectedApId || aps[0]?.id || '';
-    const shouldWatchDownlink = officialApi.resource === 'esl' && (officialApi.action === 'direct' || officialApi.action === 'bind_task');
+    const shouldWatchDownlink = ['esl', 'esl_ble'].includes(officialApi.resource)
+      && ['direct', 'bind_task', 'search', 'sync'].includes(officialApi.action);
     const beforeCaptures = targetApId && shouldWatchDownlink ? await loadOfficialDownlinks(targetApId).catch(() => []) : [];
     const beforeIds = new Set(beforeCaptures.map((capture) => capture.id));
 
@@ -3405,10 +3555,11 @@ function App() {
     const preferredAp = aps.find((item) => item.id.toLowerCase() === DEFAULT_IMAGE_TEST_AP_ID)
       ?? aps.find((item) => item.status === 'online')
       ?? aps[0];
+    const firstRealLabel = labels.find((label) => !looksLikeDemoEslCode(label.id));
     setImageTestForm((current) => ({
       ...current,
       apId: current.apId || preferredAp?.id || '',
-      eslCode: current.eslCode || labels[0]?.id || '',
+      eslCode: current.eslCode && !looksLikeDemoEslCode(current.eslCode) ? current.eslCode : firstRealLabel?.id || '',
     }));
   }, [aps, labels]);
 
@@ -3608,7 +3759,9 @@ function App() {
               </label>
               <label>目标价签
                 <select value={docCommand.labelId} onChange={(event) => setDocCommand({ ...docCommand, labelId: event.target.value })}>
-                  {labels.map((label) => <option key={label.id} value={label.id}>{label.id} · {label.title}</option>)}
+                  {labels
+                    .filter((label) => !looksLikeDemoEslCode(label.id))
+                    .map((label) => <option key={label.id} value={label.id}>{labelOptionText(label)}</option>)}
                 </select>
               </label>
               <label>指令
@@ -4202,11 +4355,13 @@ function App() {
                 </label>
                 <label>action
                   <select value={officialApi.action} onChange={(event) => setOfficialApi({ ...officialApi, action: event.target.value })}>
-                    <option value="direct">direct 直接刷新</option>
-                    <option value="bind">bind 绑定入队</option>
+                    <option value="unbind">unbind 解绑入队</option>
+                    <option value="bind">bind 单价签绑定入队</option>
+                    <option value="bind_multiple">bind_multiple 批量绑定入队</option>
                     <option value="bind_task">bind_task 触发队列</option>
                     <option value="search">search 闪灯</option>
-                    <option value="sync">sync 同步（esl 文档项）</option>
+                    <option value="sync">sync 同步价签信息</option>
+                    <option value="direct">direct 直接刷新/可带 LED</option>
                     <option value="query_status">query_status 查询指定价签</option>
                     <option value="query">query 查询列表/模板</option>
                     <option value="query_count">query_count 统计</option>
@@ -4452,6 +4607,27 @@ function App() {
               </button>
             </div>
 
+            <div className="resultGrid">
+              <div>
+                <h3>AP 队列状态</h3>
+                <p className="statusLine">
+                  rw_task_rest：{latestApQueueStatus?.rest ?? '-'}
+                  {latestApQueueStatus?.time ? ` · ${new Date(latestApQueueStatus.time).toLocaleTimeString()}` : ''}
+                  {latestApQueueStatus?.recentDownlinks !== undefined ? ` · 关联任务 ${latestApQueueStatus.recentDownlinks}` : ''}
+                </p>
+                <p className="statusLine">
+                  {latestApQueueStatus?.rest && latestApQueueStatus.rest > 0
+                    ? 'AP 队列未清空，连续点击会继续排队，稍后可能集中刷屏。'
+                    : '队列为空或尚未收到 AP_REPORT_STATUS。'}
+                </p>
+              </div>
+              <div>
+                <h3>最近执行确认</h3>
+                <p className="statusLine">{latestImageTraceInsight?.summary ?? '暂无最近 trace'}</p>
+                <p className="statusLine">最近 queue_id：{latestImageTraceInsight?.queueId ?? imageActionResult?.protocol?.queueId ?? imageTestResult?.replay?.trackingId ?? '-'}</p>
+              </div>
+            </div>
+
             <div className="commandWorkbench fourCols">
               <label>目标基站
                 <select
@@ -4466,7 +4642,9 @@ function App() {
                   value={imageTestForm.eslCode}
                   onChange={(event) => setImageTestForm((current) => ({ ...current, eslCode: event.target.value }))}
                 >
-                  {labels.map((label) => <option key={label.id} value={label.id}>{label.id} · {label.title}</option>)}
+                  {labels
+                    .filter((label) => !looksLikeDemoEslCode(label.id))
+                    .map((label) => <option key={label.id} value={label.id}>{labelOptionText(label)}</option>)}
                 </select>
               </label>
               <label>发送模式
@@ -4534,12 +4712,22 @@ function App() {
               <label>画布/编码尺寸
                 <select
                   value={imageTestForm.canvasPreset}
-                  onChange={(event) => setImageTestForm((current) => ({ ...current, canvasPreset: event.target.value }))}
+                  onChange={(event) => {
+                    const canvasPreset = event.target.value;
+                    const strategy = strategyForCanvasPreset(canvasPreset);
+                    setImageTestForm((current) => ({
+                      ...current,
+                      canvasPreset,
+                      imageRotate: strategy.imageRotate,
+                      imageFlip: strategy.imageFlip,
+                    }));
+                  }}
                 >
                   {IMAGE_CANVAS_OPTIONS.map((item) => (
                     <option key={item.value} value={item.value}>{item.label}</option>
                   ))}
                 </select>
+                <small className="fieldHint">自动策略：{strategyForCanvasPreset(imageTestForm.canvasPreset).note}</small>
               </label>
               {imageTestForm.canvasPreset === 'custom' && (
                 <>
@@ -4617,7 +4805,8 @@ function App() {
               <label>图片旋转
                 <select
                   value={imageTestForm.imageRotate}
-                  onChange={(event) => setImageTestForm((current) => ({ ...current, imageRotate: event.target.value as 'none' | 'cw90' | 'ccw90' | '180' }))}
+                  disabled
+                  onChange={(event) => setImageTestForm((current) => ({ ...current, imageRotate: event.target.value as ImageRotate }))}
                 >
                   {IMAGE_ROTATE_OPTIONS.map((item) => (
                     <option key={item.value} value={item.value}>{item.label}</option>
@@ -4627,7 +4816,8 @@ function App() {
               <label>图片翻转
                 <select
                   value={imageTestForm.imageFlip}
-                  onChange={(event) => setImageTestForm((current) => ({ ...current, imageFlip: event.target.value as 'none' | 'horizontal' | 'vertical' | 'both' }))}
+                  disabled
+                  onChange={(event) => setImageTestForm((current) => ({ ...current, imageFlip: event.target.value as ImageFlip }))}
                 >
                   {IMAGE_FLIP_OPTIONS.map((item) => (
                     <option key={item.value} value={item.value}>{item.label}</option>
@@ -4648,16 +4838,104 @@ function App() {
                   placeholder="111111.jpg"
                 />
               </label>
+              <label>图片闪灯 payload
+                <input
+                  value={imageTestForm.ledB64dat}
+                  onChange={(event) => setImageTestForm((current) => ({ ...current, ledB64dat: event.target.value }))}
+                  placeholder="AGQAZP8sAQ=="
+                />
+                <small className="fieldHint">官方 direct+led 捕获：01-00-00-07 / {imageTestForm.ledB64dat || 'AGQAZP8sAQ=='}</small>
+              </label>
               <label className="checkLabel"><input type="checkbox" checked={imageTestForm.fourColor} onChange={(event) => setImageTestForm((current) => ({ ...current, fourColor: event.target.checked }))} /> 红黄黑白四色预处理</label>
               <label className="checkLabel"><input type="checkbox" checked={imageTestForm.fastMode} onChange={(event) => setImageTestForm((current) => ({ ...current, fastMode: event.target.checked }))} /> fastMode 快速筛选</label>
+              <label className="checkLabel"><input type="checkbox" checked={imageTestForm.imageLed} onChange={(event) => setImageTestForm((current) => ({ ...current, imageLed: event.target.checked }))} /> 下发图片同时闪灯（复刻官方 direct+led）</label>
               <label className="checkLabel"><input type="checkbox" checked={imageTestForm.dryRun} onChange={(event) => setImageTestForm((current) => ({ ...current, dryRun: event.target.checked }))} /> dryRun（只算参数不下发）</label>
             </div>
 
+            <section className="panelSubsection">
+              <div className="sectionHead compactHead">
+                <div>
+                  <h3>价签操作</h3>
+                  <p className="statusLine">使用当前目标基站和目标价签发送，队列未清空时不要连续重复点击。</p>
+                </div>
+              </div>
+              <div className="commandWorkbench fiveCols">
+                <label>LED R<input type="number" value={docCommand.r} onChange={(event) => setDocCommand({ ...docCommand, r: Number(event.target.value) })} /></label>
+                <label>LED G<input type="number" value={docCommand.g} onChange={(event) => setDocCommand({ ...docCommand, g: Number(event.target.value) })} /></label>
+                <label>LED B<input type="number" value={docCommand.b} onChange={(event) => setDocCommand({ ...docCommand, b: Number(event.target.value) })} /></label>
+                <label>亮灯 ms<input type="number" value={docCommand.time_on_ms} onChange={(event) => setDocCommand({ ...docCommand, time_on_ms: Number(event.target.value) })} /></label>
+                <label>持续 s<input type="number" value={docCommand.time_s} onChange={(event) => setDocCommand({ ...docCommand, time_s: Number(event.target.value) })} /></label>
+                <label>刷新 index<input type="number" value={docCommand.index} onChange={(event) => setDocCommand({ ...docCommand, index: Number(event.target.value) })} /></label>
+                <label>换组 group<input type="number" value={docCommand.group} onChange={(event) => setDocCommand({ ...docCommand, group: Number(event.target.value) })} /></label>
+                <label>NDEF/OTA b64<input value={docCommand.b64dat} onChange={(event) => setDocCommand({ ...docCommand, b64dat: event.target.value })} /></label>
+                <label className="checkLabel"><input type="checkbox" checked={docCommand.prePsm} onChange={(event) => setDocCommand({ ...docCommand, prePsm: event.target.checked })} /> 图像类先发 AP_PSM</label>
+              </div>
+              <div className="toolbar commandToggles">
+                {IMAGE_TEST_TAG_ACTIONS.map((action) => (
+                  <button
+                    key={action.value}
+                    className="smallButton"
+                    disabled={Boolean(imageActionRunning)}
+                    onClick={() => sendImageTestDocumentCommand(action.value, action.label)}
+                  >
+                    {imageActionRunning === action.value ? '发送中...' : action.label}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="panelSubsection">
+              <div className="sectionHead compactHead">
+                <div>
+                  <h3>基站操作</h3>
+                  <p className="statusLine">重启、休眠和 OTA 会影响当前基站连接，执行前会二次确认。</p>
+                </div>
+              </div>
+              <div className="commandWorkbench fiveCols">
+                <label>PSM 模式
+                  <select value={docCommand.psmMode} onChange={(event) => setDocCommand({ ...docCommand, psmMode: event.target.value })}>
+                    <option value="fast">fast</option>
+                    <option value="default">default</option>
+                    <option value="slow">slow</option>
+                    <option value="sleep">sleep</option>
+                    <option value="disable">disable</option>
+                  </select>
+                </label>
+                <label>adv_group<input type="number" value={docCommand.adv_group} onChange={(event) => setDocCommand({ ...docCommand, adv_group: Number(event.target.value) })} /></label>
+                <label>duration_ms<input type="number" value={docCommand.duration_ms} onChange={(event) => setDocCommand({ ...docCommand, duration_ms: Number(event.target.value) })} /></label>
+                <label>act_time_us<input type="number" value={docCommand.act_time_us} onChange={(event) => setDocCommand({ ...docCommand, act_time_us: Number(event.target.value) })} /></label>
+                <label>slp_cycle_ms<input type="number" value={docCommand.slp_cycle_ms} onChange={(event) => setDocCommand({ ...docCommand, slp_cycle_ms: Number(event.target.value) })} /></label>
+                <label>adv_interval_ms<input type="number" value={docCommand.adv_interval_ms} onChange={(event) => setDocCommand({ ...docCommand, adv_interval_ms: Number(event.target.value) })} /></label>
+                <label>retry_num<input type="number" value={docCommand.retry_num} onChange={(event) => setDocCommand({ ...docCommand, retry_num: Number(event.target.value) })} /></label>
+                <label>parallel_num<input type="number" value={docCommand.parallel_num} onChange={(event) => setDocCommand({ ...docCommand, parallel_num: Number(event.target.value) })} /></label>
+                <label>ap_chn_num<input type="number" value={docCommand.ap_chn_num} onChange={(event) => setDocCommand({ ...docCommand, ap_chn_num: Number(event.target.value) })} /></label>
+                <label>AP OTA URL<input value={docCommand.url} onChange={(event) => setDocCommand({ ...docCommand, url: event.target.value })} /></label>
+                <label>AP OTA MD5<input value={docCommand.md5} onChange={(event) => setDocCommand({ ...docCommand, md5: event.target.value })} /></label>
+              </div>
+              <div className="toolbar commandToggles">
+                {IMAGE_TEST_AP_ACTIONS.map((action) => (
+                  <button
+                    key={action.value}
+                    className="smallButton"
+                    disabled={Boolean(imageActionRunning)}
+                    onClick={() => sendImageTestDocumentCommand(action.value, action.label)}
+                  >
+                    {imageActionRunning === action.value ? '发送中...' : action.label}
+                  </button>
+                ))}
+              </div>
+            </section>
+
             <p className="statusLine">文件：{imageTestFile?.name ?? (imageTestForm.localImageName || '未选择')} · 状态：{imageTestStatus}</p>
+            <p className="statusLine">操作台：{imageActionStatus}</p>
             <div className="resultGrid">
               <div>
                 <h3>执行结果</h3>
                 <pre>{imageTestResult ? JSON.stringify(imageTestResult, null, 2) : '未执行'}</pre>
+              </div>
+              <div>
+                <h3>操作结果</h3>
+                <pre>{imageActionResult ? JSON.stringify(imageActionResult, null, 2) : '未执行'}</pre>
               </div>
               <div>
                 <h3>使用说明</h3>

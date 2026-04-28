@@ -164,6 +164,8 @@ export class OfficialApiController {
       renderPreset?: string;
       canvasPreset?: string;
       renderScale?: number | string;
+      imageLed?: boolean | string;
+      ledB64dat?: string;
       dryRun?: boolean | string;
     },
   ) {
@@ -193,6 +195,8 @@ export class OfficialApiController {
       renderPreset?: string;
       canvasPreset?: string;
       renderScale?: number | string;
+      imageLed?: boolean | string;
+      ledB64dat?: string;
       topN?: number;
       fastMode?: boolean | string;
     },
