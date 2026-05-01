@@ -136,19 +136,19 @@ function escapeXml(value: unknown) {
 }
 
 function defaultSchema(template: Row) {
-  const width = numberValue(template.width, 296);
-  const height = numberValue(template.height, 128);
+  const width = numberValue(template.width, 800);
+  const height = numberValue(template.height, 480);
   const name = stringValue(template.name, 'Default Template');
   return {
     meta: {
       name,
-      deviceType: stringValue(template.deviceType, 'KERSEN_296_128'),
+      deviceType: stringValue(template.deviceType, 'ET0750-89'),
       width,
       height,
-      colorMode: stringValue(template.colorMode, 'bw'),
+      colorMode: stringValue(template.colorMode, 'bwry'),
       version: numberValue(template.version, 1),
     },
-    datasource: ['name', 'price', 'sku', 'barcode'],
+    datasource: ['name', 'price', 'sku', 'barcode', 'imageUrl'],
     elements: [
       {
         id: 'background',
@@ -171,46 +171,44 @@ function defaultSchema(template: Row) {
           background: '#ffffff',
         },
       },
-      {
-        id: 'title',
-        type: 'text',
-        x: 18,
-        y: 16,
-        width: width - 36,
-        height: 28,
-        rotate: 0,
-        visible: true,
-        zIndex: 2,
-        bindingField: 'name',
-        style: { fontSize: 18, fontWeight: 'bold', fill: '#111111' },
-      },
-      {
-        id: 'price',
-        type: 'price',
-        x: 18,
-        y: 54,
-        width: width - 36,
-        height: 42,
-        rotate: 0,
-        visible: true,
-        zIndex: 3,
-        bindingField: 'price',
-        style: { fontSize: 34, fontWeight: 'bold', fill: '#111111' },
-      },
-      {
-        id: 'barcode',
-        type: 'barcode',
-        x: 18,
-        y: height - 28,
-        width: Math.min(150, width - 36),
-        height: 22,
-        rotate: 0,
-        visible: true,
-        zIndex: 4,
-        bindingField: 'barcode',
-        style: {},
-      },
     ],
+  };
+}
+
+function resizeSchemaToCanvas(schema: Row, width: number, height: number, deviceType: string, colorMode: string) {
+  const meta = (schema.meta && typeof schema.meta === 'object' ? schema.meta : {}) as Row;
+  const oldWidth = numberValue(meta.width, width);
+  const oldHeight = numberValue(meta.height, height);
+  const scaleX = oldWidth ? width / oldWidth : 1;
+  const scaleY = oldHeight ? height / oldHeight : 1;
+  const elements = Array.isArray(schema.elements) ? schema.elements as Row[] : [];
+  return {
+    ...schema,
+    meta: {
+      ...meta,
+      deviceType,
+      width,
+      height,
+      colorMode,
+    },
+    elements: elements.map((element) => {
+      const isBackground = element.type === 'image'
+        && numberValue(element.x) === 0
+        && numberValue(element.y) === 0
+        && numberValue(element.width) === oldWidth
+        && numberValue(element.height) === oldHeight
+        && numberValue(element.zIndex) <= 1;
+      if (isBackground) {
+        return { ...element, x: 0, y: 0, width, height, zIndex: 1 };
+      }
+      return {
+        ...element,
+        x: Math.round(numberValue(element.x) * scaleX),
+        y: Math.round(numberValue(element.y) * scaleY),
+        width: Math.max(1, Math.round(numberValue(element.width, 1) * scaleX)),
+        height: Math.max(1, Math.round(numberValue(element.height, 1) * scaleY)),
+      };
+    }),
   };
 }
 
@@ -394,11 +392,18 @@ export class LocalCloudController {
   }
 
   @Get('templates/:templateId/preview-image')
-  templatePreviewImage(@Param('templateId') templateId: string, @Res({ passthrough: true }) response: Response) {
+  async templatePreviewImage(@Param('templateId') templateId: string, @Res({ passthrough: true }) response: Response) {
     const template = this.findTemplate(templateId);
-    response.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
+    const render = await this.renderTemplateForLabel(this.labelFromProduct({
+      id: 'preview',
+      sku: 'PREVIEW',
+      name: stringValue(template.name, 'Preview Product'),
+      price: 19.9,
+    }), template);
+    const png = Buffer.from(render.previewImageUrl.split(',')[1] ?? '', 'base64');
+    response.setHeader('Content-Type', 'image/png');
     response.setHeader('Cache-Control', 'no-store');
-    return this.renderTemplatePreviewSvg(template.schema as Row);
+    return new StreamableFile(png);
   }
 
   @Post('templates/:templateId/preview')
@@ -794,11 +799,11 @@ export class LocalCloudController {
       id: templateId,
       code: stringValue(input.code, `TPL_${Date.now()}`),
       name: stringValue(input.name, 'Default Template'),
-      deviceType: stringValue(input.deviceType, 'KERSEN_296_128'),
-      width: numberValue(input.width, 296),
-      height: numberValue(input.height, 128),
+      deviceType: stringValue(input.deviceType, 'ET0750-89'),
+      width: numberValue(input.width, 800),
+      height: numberValue(input.height, 480),
       dpi: numberValue(input.dpi, 120),
-      colorMode: input.colorMode ?? 'bw',
+      colorMode: input.colorMode ?? 'bwry',
       status: input.status ?? 'draft',
       version: numberValue(input.version, 1),
       previewImageUrl: stringValue(input.previewImageUrl, this.templatePreviewUrl(templateId)),
@@ -807,6 +812,13 @@ export class LocalCloudController {
       createdAt: stringValue(input.createdAt, timestamp),
       updatedAt: timestamp,
     };
+    template.schema = resizeSchemaToCanvas(
+      template.schema as Row,
+      template.width,
+      template.height,
+      template.deviceType,
+      String(template.colorMode),
+    );
     this.db.cloudTemplates.set(template.id, template);
     this.db.save();
     return template;
@@ -986,12 +998,12 @@ export class LocalCloudController {
       ?? (product?.defaultTemplateId ? this.db.cloudTemplates.get(String(product.defaultTemplateId)) ?? null : null)
       ?? this.ensureDefaultTemplate();
     const schema = (template.schema && typeof template.schema === 'object' ? template.schema : defaultSchema(template)) as Row;
-    const meta = (schema.meta && typeof schema.meta === 'object' ? schema.meta : {}) as Row;
-    const width = numberValue(template.width, numberValue(meta.width, 296));
-    const height = numberValue(template.height, numberValue(meta.height, 128));
-    const colorMode = stringValue(template.colorMode, stringValue(meta.colorMode, 'bwry'));
+    const width = numberValue(template.width, 800);
+    const height = numberValue(template.height, 480);
+    const colorMode = stringValue(template.colorMode, 'bwry');
+    const normalizedSchema = resizeSchemaToCanvas(schema, width, height, stringValue(template.deviceType, 'ET0750-89'), colorMode);
     const bindings = this.buildTemplateBindings(label, product);
-    const svg = this.renderTemplateSvg(schema, bindings, width, height);
+    const svg = await this.renderTemplateSvg(normalizedSchema, bindings, width, height);
     const { data: rgba } = await sharp(Buffer.from(svg))
       .resize(width, height, { fit: 'fill', kernel: 'linear' })
       .ensureAlpha()
@@ -1013,11 +1025,14 @@ export class LocalCloudController {
 
   private buildTemplateBindings(label: Label, product?: Row | null) {
     const source = product ?? {};
+    const customFields = source.customFields && typeof source.customFields === 'object' ? source.customFields as Row : {};
     const price = numberValue(source.price, label.price);
     return {
+      sourceId: stringValue(source.sourceId, stringValue(source.sku, label.sku ?? label.id)),
       id: label.id,
       eslCode: label.id,
       sku: stringValue(source.sku, label.sku ?? label.id),
+      reference: stringValue(source.reference, stringValue(source.barcode, label.sku ?? label.id)),
       barcode: stringValue(source.barcode, label.sku ?? label.id),
       name: stringValue(source.name, label.title),
       title: stringValue(source.name, label.title),
@@ -1025,22 +1040,28 @@ export class LocalCloudController {
       brand: stringValue(source.brand),
       category: stringValue(source.category),
       price: price.toFixed(2),
+      field1: price.toFixed(2),
       originalPrice: numberValue(source.originalPrice, price).toFixed(2),
       memberPrice: numberValue(source.memberPrice, price).toFixed(2),
       promotionPrice: numberValue(source.promotionPrice, price).toFixed(2),
+      field2: numberValue(source.promotionPrice, price).toFixed(2),
       promotionText: stringValue(source.promotionText),
       unit: stringValue(source.unit),
       specification: stringValue(source.specification),
       imageUrl: stringValue(source.imageUrl),
+      ...Object.fromEntries(Array.from({ length: 22 }, (_, index) => {
+        const key = `customField${index + 1}`;
+        return [key, stringValue(source[key], stringValue(customFields[key]))];
+      })),
     };
   }
 
-  private renderTemplateSvg(schema: Row, bindings: Record<string, string>, width: number, height: number) {
+  private async renderTemplateSvg(schema: Row, bindings: Record<string, string>, width: number, height: number) {
     const elements = Array.isArray(schema?.elements) ? schema.elements as Row[] : [];
-    const body = elements
+    const body = (await Promise.all(elements
       .filter((item) => item.visible !== false)
       .sort((left, right) => numberValue(left.zIndex, 0) - numberValue(right.zIndex, 0))
-      .map((item) => this.renderPreviewElement(item, bindings))
+      .map((item) => this.renderPreviewElement(item, bindings))))
       .join('');
     return [
       `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
@@ -1059,18 +1080,9 @@ export class LocalCloudController {
   }
 
   private async renderIntoService0cCanvas(render: RenderedTemplateImage, width: number, height: number) {
-    const canvas = Buffer.alloc(width * height * 4, 255);
-    for (let offset = 0; offset < canvas.length; offset += 4) {
-      canvas[offset + 3] = 255;
-    }
-    const targetWidth = Math.min(render.width, width);
-    const targetHeight = Math.min(render.height, height);
-    const image = await sharp(render.rgba, { raw: { width: render.width, height: render.height, channels: 4 } })
-      .resize(targetWidth, targetHeight, { fit: 'fill', kernel: 'linear' })
-      .raw()
-      .toBuffer();
-    return sharp(canvas, { raw: { width, height, channels: 4 } })
-      .composite([{ input: image, raw: { width: targetWidth, height: targetHeight, channels: 4 }, left: Math.floor((width - targetWidth) / 2), top: Math.floor((height - targetHeight) / 2) }])
+    return sharp(render.rgba, { raw: { width: render.width, height: render.height, channels: 4 } })
+      .resize(width, height, { fit: 'fill', kernel: 'linear' })
+      .ensureAlpha()
       .raw()
       .toBuffer();
   }
@@ -1195,7 +1207,7 @@ export class LocalCloudController {
     return `/api/v1/templates/${templateId}/preview-image?t=${Date.now()}`;
   }
 
-  private renderTemplatePreviewSvg(schema: Row) {
+  private async renderTemplatePreviewSvg(schema: Row) {
     const meta = (schema?.meta && typeof schema.meta === 'object' ? schema.meta : {}) as Row;
     const width = numberValue(meta.width, 296);
     const height = numberValue(meta.height, 128);
@@ -1209,7 +1221,7 @@ export class LocalCloudController {
     }, width, height);
   }
 
-  private renderPreviewElement(item: Row, bindings: Record<string, string> = {}) {
+  private async renderPreviewElement(item: Row, bindings: Record<string, string> = {}) {
     const type = String(item.type ?? 'text');
     const x = numberValue(item.x, 0);
     const y = numberValue(item.y, 0);
@@ -1217,10 +1229,12 @@ export class LocalCloudController {
     const height = numberValue(item.height, 24);
     const style = (item.style && typeof item.style === 'object' ? item.style : {}) as Row;
     const bindingField = stringValue(item.bindingField);
-    const boundText = bindingField ? stringValue(bindings[bindingField]) : '';
+    const bindingKey = bindingField.replace(/^#/, '');
+    const boundText = bindingField ? stringValue(bindings[bindingKey] ?? bindings[bindingField]) : '';
     if (type === 'image') {
-      const href = bindingField === 'imageUrl' && bindings.imageUrl ? bindings.imageUrl : stringValue(item.expression);
-      return href ? `<image href="${escapeXml(href)}" x="${x}" y="${y}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid slice"/>` : '';
+      const href = bindingKey === 'imageUrl' && bindings.imageUrl ? bindings.imageUrl : stringValue(item.expression);
+      const resolvedHref = await this.resolveImageDataUri(href);
+      return resolvedHref ? `<image href="${escapeXml(resolvedHref)}" x="${x}" y="${y}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid slice"/>` : `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${escapeXml(style.background ?? '#ffffff')}"/>`;
     }
     if (type === 'rect') {
       return `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${escapeXml(style.fill ?? style.background ?? '#ffffff')}" stroke="${escapeXml(style.stroke ?? '#111111')}"/>`;
@@ -1238,13 +1252,46 @@ export class LocalCloudController {
     return `<text x="${x}" y="${y + fontSize}" font-size="${fontSize}" font-weight="${fontWeight}" font-family="${SVG_FONT_STACK}" fill="${fill}">${escapeXml(text)}</text>`;
   }
 
+  private async resolveImageDataUri(value: string) {
+    const source = stringValue(value);
+    if (!source) return '';
+    if (source.startsWith('data:image/')) return source;
+
+    try {
+      let body: Buffer;
+      let contentType = 'image/png';
+      const uploadMatch = source.match(/\/api\/v1\/uploads\/files\/([^/?#]+)/);
+      if (uploadMatch?.[1]) {
+        const filename = decodeURIComponent(uploadMatch[1]);
+        body = await fs.readFile(join(uploadDir, filename));
+        contentType = imageContentType(filename);
+      } else {
+        const url = source.startsWith('/')
+          ? new URL(source, process.env.PUBLIC_SERVER_URL ?? 'http://localhost:4000').toString()
+          : source;
+        const response = await fetch(url);
+        if (!response.ok) return '';
+        const arrayBuffer = await response.arrayBuffer();
+        body = Buffer.from(arrayBuffer);
+        contentType = response.headers.get('content-type')?.split(';')[0] || imageContentType(url);
+      }
+      return `data:${contentType};base64,${body.toString('base64')}`;
+    } catch {
+      return '';
+    }
+  }
+
   private ensureDefaultTemplate() {
     const existing = [...this.db.cloudTemplates.values()][0];
     if (existing) return existing;
     return this.upsertTemplate({
-      id: 'template_default_296x128',
-      code: 'DEFAULT_296_128',
-      name: 'Kersen 296x128 默认模板',
+      id: 'template_default_750_480',
+      code: 'DEFAULT_750_480',
+      name: 'Kersen 7.5 默认模板',
+      deviceType: 'ET0750-89',
+      width: 800,
+      height: 480,
+      colorMode: 'bwry',
       status: 'published',
     });
   }
@@ -1406,11 +1453,22 @@ export class LocalCloudController {
   }
 
   private ensureTemplatePreview(template: Row): Row {
+    const normalizedSchema = resizeSchemaToCanvas(
+      (template.schema && typeof template.schema === 'object' ? template.schema : defaultSchema(template)) as Row,
+      numberValue(template.width, 800),
+      numberValue(template.height, 480),
+      stringValue(template.deviceType, 'ET0750-89'),
+      stringValue(template.colorMode, 'bwry'),
+    );
     if (stringValue(template.previewImageUrl)) {
-      return template;
+      const normalized: Row = { ...template, schema: normalizedSchema };
+      this.db.cloudTemplates.set(String(normalized.id), normalized);
+      this.db.save();
+      return normalized;
     }
     const next: Row = {
       ...template,
+      schema: normalizedSchema,
       previewImageUrl: this.templatePreviewUrl(String(template.id)),
     };
     this.db.cloudTemplates.set(String(next.id), next);

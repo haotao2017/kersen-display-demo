@@ -24,6 +24,7 @@ const ESL_SCREEN_PRESETS = [
   { id: 'et0750-89', label: '7.50" ET0750-89 · 800×480', width: 800, height: 480, colorMode: 'bwry' as const },
   { id: 'et1020-8b', label: '10.2" ET1020-8B · 960×640', width: 960, height: 640, colorMode: 'bwry' as const },
 ];
+const DEFAULT_SCREEN_PRESET = ESL_SCREEN_PRESETS[6];
 
 const DESIGNER_COLOR_SWATCHES = [
   { key: 'black', value: '#111111' },
@@ -175,28 +176,6 @@ const TemplatePreviewThumbnail = ({
     );
   }
 
-  const shouldShowFullPreview = hasUsableFullBleedBackground(schema);
-  const { canvasWidth, canvasHeight, cropX, cropY, cropWidth, cropHeight } = getTemplatePreviewFocus(schema);
-  const scale = !shouldShowFullPreview && canvasWidth && canvasHeight && cropWidth && cropHeight
-    ? Math.max(frameWidth / cropWidth, frameHeight / cropHeight)
-    : 1;
-  const imageWidth = shouldShowFullPreview
-    ? frameWidth
-    : Math.max(frameWidth, Math.round(canvasWidth * scale));
-  const imageHeight = shouldShowFullPreview
-    ? frameHeight
-    : Math.max(frameHeight, Math.round(canvasHeight * scale));
-  const offsetX = shouldShowFullPreview
-    ? 0
-    : canvasWidth
-      ? Math.round((frameWidth - cropWidth * scale) / 2 - cropX * scale)
-      : 0;
-  const offsetY = shouldShowFullPreview
-    ? 0
-    : canvasHeight
-      ? Math.round((frameHeight - cropHeight * scale) / 2 - cropY * scale)
-      : 0;
-
   return (
     <div
       style={{
@@ -213,13 +192,10 @@ const TemplatePreviewThumbnail = ({
         src={resolveDesignerAssetUrl(previewImageUrl)}
         alt={name}
         style={{
-          width: imageWidth,
-          height: imageHeight,
-          position: 'absolute',
-          left: offsetX,
-          top: offsetY,
+          width: '100%',
+          height: '100%',
           display: 'block',
-          objectFit: shouldShowFullPreview ? 'cover' : 'fill',
+          objectFit: 'contain',
         }}
       />
     </div>
@@ -302,6 +278,58 @@ const sanitizeDesignerSchema = (schema: any) => {
     ...schema,
     elements: dedupedElements,
   };
+};
+
+const resizeDesignerSchema = (schema: TemplateSchema, preset: typeof ESL_SCREEN_PRESETS[number]): TemplateSchema => {
+  const oldWidth = Number(schema.meta.width || preset.width) || preset.width;
+  const oldHeight = Number(schema.meta.height || preset.height) || preset.height;
+  const scaleX = preset.width / oldWidth;
+  const scaleY = preset.height / oldHeight;
+  return {
+    ...schema,
+      meta: {
+        ...schema.meta,
+        deviceType: preset.id.toUpperCase(),
+        width: preset.width,
+        height: preset.height,
+        colorMode: 'bwry' as const,
+    },
+    elements: schema.elements.map((element) => {
+      const isBackground = isBackgroundImageElement(element, { width: oldWidth, height: oldHeight });
+      if (isBackground) {
+        return {
+          ...element,
+          x: 0,
+          y: 0,
+          width: preset.width,
+          height: preset.height,
+          zIndex: 1,
+        };
+      }
+      return {
+        ...element,
+        x: snapValue(Math.round(element.x * scaleX)),
+        y: snapValue(Math.round(element.y * scaleY)),
+        width: Math.max(1, snapValue(Math.round(element.width * scaleX))),
+        height: Math.max(1, snapValue(Math.round(element.height * scaleY))),
+      };
+    }),
+  };
+};
+
+const applyScreenPresetToSchema = (schema: TemplateSchema | null, preset: typeof ESL_SCREEN_PRESETS[number]) => {
+  if (!schema) return schema;
+  if (schema.meta.width === preset.width && schema.meta.height === preset.height) {
+    return {
+      ...schema,
+      meta: {
+        ...schema.meta,
+        deviceType: preset.id.toUpperCase(),
+        colorMode: 'bwry' as const,
+      },
+    };
+  }
+  return resizeDesignerSchema(schema, preset);
 };
 
 const createDesignerElement = (
@@ -435,21 +463,21 @@ const loadCanvasImage = (src?: string | null) =>
     tryLoad(true);
   });
 
-const getImageContainLayout = (image: HTMLImageElement, width: number, height: number) => {
+const getImageCoverCrop = (image: HTMLImageElement, width: number, height: number) => {
   const imageWidth = image.naturalWidth || image.width;
   const imageHeight = image.naturalHeight || image.height;
   if (!imageWidth || !imageHeight || !width || !height) {
     return undefined;
   }
 
-  const scale = Math.min(width / imageWidth, height / imageHeight);
-  const drawWidth = imageWidth * scale;
-  const drawHeight = imageHeight * scale;
+  const scale = Math.max(width / imageWidth, height / imageHeight);
+  const cropWidth = width / scale;
+  const cropHeight = height / scale;
   return {
-    x: (width - drawWidth) / 2,
-    y: (height - drawHeight) / 2,
-    width: drawWidth,
-    height: drawHeight,
+    x: Math.max(0, (imageWidth - cropWidth) / 2),
+    y: Math.max(0, (imageHeight - cropHeight) / 2),
+    width: Math.min(imageWidth, cropWidth),
+    height: Math.min(imageHeight, cropHeight),
   };
 };
 
@@ -516,7 +544,7 @@ const DesignerElementNode = ({
   const background = String(element.style.background ?? '#ffffff');
   const activeStroke = isSelected ? '#1677ff' : isHovering ? '#7cb3ff' : stroke;
   const activeShadow = isSelected || isHovering ? 'rgba(22,119,255,0.18)' : undefined;
-  const imageLayout = image && element.type === 'image' ? getImageContainLayout(image, element.width, element.height) : undefined;
+  const imageCrop = image && element.type === 'image' ? getImageCoverCrop(image, element.width, element.height) : undefined;
 
   if (element.type === 'rect') {
     return (
@@ -572,13 +600,14 @@ const DesignerElementNode = ({
             shadowColor={activeShadow}
             shadowBlur={isSelected ? 8 : isHovering ? 4 : 0}
           />
-          {imageLayout ? (
+          {imageCrop ? (
             <KonvaImage
               image={image}
-              x={imageLayout.x}
-              y={imageLayout.y}
-              width={imageLayout.width}
-              height={imageLayout.height}
+              x={0}
+              y={0}
+              width={element.width}
+              height={element.height}
+              crop={imageCrop}
               cornerRadius={6}
               listening={false}
             />
@@ -777,11 +806,11 @@ export const TemplateFormPage = () => {
   });
   const currentPresetId = useMemo(() => {
     const current = ESL_SCREEN_PRESETS.find((item) => item.width === data?.width && item.height === data?.height);
-    return current?.id ?? ESL_SCREEN_PRESETS[3].id;
+    return current?.id ?? DEFAULT_SCREEN_PRESET.id;
   }, [data]);
 
   useEffect(() => {
-    const preset = ESL_SCREEN_PRESETS.find((item) => item.id === currentPresetId) ?? ESL_SCREEN_PRESETS[3];
+    const preset = ESL_SCREEN_PRESETS.find((item) => item.id === currentPresetId) ?? DEFAULT_SCREEN_PRESET;
     form.setFieldsValue({
       ...data,
       screenPreset: preset.id,
@@ -797,9 +826,9 @@ export const TemplateFormPage = () => {
       <Form
         form={form}
         layout="vertical"
-        initialValues={{ screenPreset: ESL_SCREEN_PRESETS[3].id, deviceType: 'ET0290-84', width: 296, height: 128, colorMode: 'bwry', status: 'draft' }}
+        initialValues={{ screenPreset: DEFAULT_SCREEN_PRESET.id, deviceType: DEFAULT_SCREEN_PRESET.id.toUpperCase(), width: DEFAULT_SCREEN_PRESET.width, height: DEFAULT_SCREEN_PRESET.height, colorMode: 'bwry', status: 'draft' }}
         onFinish={(values) => {
-          const preset = ESL_SCREEN_PRESETS.find((item) => item.id === values.screenPreset) ?? ESL_SCREEN_PRESETS[3];
+          const preset = ESL_SCREEN_PRESETS.find((item) => item.id === values.screenPreset) ?? DEFAULT_SCREEN_PRESET;
           mutation.mutate({
             ...values,
             deviceType: preset.id.toUpperCase(),
@@ -933,7 +962,7 @@ export const TemplateDesignerPage = () => {
   } = useDesignerStore();
   const saveTemplateMeta = async () => {
     const values = await templateForm.validateFields();
-    const preset = ESL_SCREEN_PRESETS.find((item) => item.id === values.screenPreset) ?? ESL_SCREEN_PRESETS[3];
+    const preset = ESL_SCREEN_PRESETS.find((item) => item.id === values.screenPreset) ?? DEFAULT_SCREEN_PRESET;
     await api.updateTemplate(id, {
       name: values.name,
       code: values.code,
@@ -943,11 +972,13 @@ export const TemplateDesignerPage = () => {
       height: preset.height,
       colorMode: 'bwry',
     });
+    return preset;
   };
   const save = useMutation({
     mutationFn: async () => {
-      await saveTemplateMeta();
-      return api.saveTemplateSchema(id, sanitizeDesignerSchema(schema!));
+      const preset = await saveTemplateMeta();
+      const nextSchema = sanitizeDesignerSchema(applyScreenPresetToSchema(schema!, preset));
+      return api.saveTemplateSchema(id, nextSchema);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.templateSchema(id) });
@@ -958,8 +989,8 @@ export const TemplateDesignerPage = () => {
   });
   const publishTemplate = useMutation({
     mutationFn: async () => {
-      await saveTemplateMeta();
-      await api.saveTemplateSchema(id, sanitizeDesignerSchema(schema!));
+      const preset = await saveTemplateMeta();
+      await api.saveTemplateSchema(id, sanitizeDesignerSchema(applyScreenPresetToSchema(schema!, preset)));
       return api.publishTemplate(id, true);
     },
     onSuccess: () => {
@@ -1091,18 +1122,22 @@ export const TemplateDesignerPage = () => {
 
   useEffect(() => {
     if (!data?.schema) return;
-    const sanitizedSchema = sanitizeDesignerSchema(data.schema);
+    const preset = templateDetail
+      ? ESL_SCREEN_PRESETS.find((item) => item.width === templateDetail.width && item.height === templateDetail.height) ?? DEFAULT_SCREEN_PRESET
+      : DEFAULT_SCREEN_PRESET;
+    const sizedSchema = applyScreenPresetToSchema(data.schema, preset) ?? data.schema;
+    const sanitizedSchema = sanitizeDesignerSchema(sizedSchema);
     const nextElements = (sanitizedSchema.elements ?? []).map((item: any) => {
       if (item.type !== 'image') return item;
       const resolvedExpression = resolveDesignerAssetUrl(item.expression);
       return resolvedExpression ? { ...item, expression: resolvedExpression } : item;
     });
     setSchema({ ...sanitizedSchema, elements: nextElements });
-  }, [data, setSchema]);
+  }, [data, templateDetail?.width, templateDetail?.height, setSchema]);
 
   useEffect(() => {
     if (!templateDetail) return;
-    const preset = ESL_SCREEN_PRESETS.find((item) => item.width === templateDetail.width && item.height === templateDetail.height) ?? ESL_SCREEN_PRESETS[3];
+    const preset = ESL_SCREEN_PRESETS.find((item) => item.width === templateDetail.width && item.height === templateDetail.height) ?? DEFAULT_SCREEN_PRESET;
     templateForm.setFieldsValue({
       name: templateDetail.name,
       code: templateDetail.code,
@@ -1804,6 +1839,10 @@ export const TemplateDesignerPage = () => {
                       onChange={(value) => {
                         const preset = ESL_SCREEN_PRESETS.find((item) => item.id === value);
                         if (!preset) return;
+                        const nextSchema = applyScreenPresetToSchema(schema, preset);
+                        if (nextSchema) {
+                          setSchema(nextSchema);
+                        }
                         templateForm.setFieldsValue({
                           deviceType: preset.id.toUpperCase(),
                           width: preset.width,
