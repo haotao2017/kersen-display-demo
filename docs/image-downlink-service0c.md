@@ -181,6 +181,27 @@ query_count   查询统计
 
 控制台“官方 API 实验”模块已把这些 action 加到下拉里。调用 `search`、`sync`、`direct`、`bind_task` 后会自动监听新的 `READ_WRITE_SVC` 捕获包，用于继续解析官方真实下发格式。
 
+2026-04-29 复核官方文档 `API Reference` 后，官方 API 实验模块补齐了文档中的主要资源：
+
+```text
+query/env        查询官方环境信息
+
+esl_ble          query / query_count / bind / bind_multiple / unbind / search / direct / del
+esl              bind / bind_multiple / unbind / search / sync / direct / bind_task / query / query_count / query_status / del
+esl_wifi         query / query_count / bind / bind_multiple / unbind / search / direct / del
+nfc              query / query_count / direct / del
+pad              bind / bind_multiple / unbind / del / query
+
+product          create / create_multiple / del_multiple / query / query_count / query_with_code
+productadjust    create_order / del_order / adjust_task
+store            create / set
+template         query
+pad_template     query
+user             create / delete
+```
+
+说明：官方文档没有提供“基站后台配置”的 HTTP API。基站接入服务器、热点隐藏、Wi-Fi 桥接/中继、USB 发射器配置等仍是基站本地 Web 后台操作：连接 `eslap-xxxxxxxx` 热点或同网段访问基站 IP，登录 `root/123456`，进入 `ESL--AP Config` / 网络无线菜单配置。
+
 ## 入口接口
 
 控制台“图片测试”页最终应选择：

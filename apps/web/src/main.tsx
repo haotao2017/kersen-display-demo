@@ -2407,7 +2407,9 @@ function App() {
 
   async function callOfficialApiExperiment() {
     const eslCode = officialApi.eslCode || docCommand.labelId || labels[0]?.id || '';
-    const needsEslCode = ['direct', 'bind', 'bind_multiple', 'unbind', 'search', 'query_status'].includes(officialApi.action);
+    const terminalResources = ['esl', 'esl_ble', 'esl_wifi', 'nfc', 'pad'];
+    const needsEslCode = terminalResources.includes(officialApi.resource)
+      && ['direct', 'bind', 'bind_multiple', 'unbind', 'search', 'query_status', 'del'].includes(officialApi.action);
     if (needsEslCode && !eslCode) {
       setMessage('没有目标价签，无法调用官方 API 实验');
       return;
@@ -2417,8 +2419,16 @@ function App() {
       return;
     }
     const product = officialProductFromInputs();
-    const directItem = {
+    const bindItem = {
       esl_code: eslCode,
+      product_code: officialApi.productCode,
+      product_inner: officialApi.productCode,
+      template_id: String(officialApi.templateId),
+      esltemplate_id: Number(officialApi.templateId),
+    };
+    const directCodeKey = officialApi.resource === 'nfc' ? 'nfc_code' : officialApi.resource === 'pad' ? 'pad_code' : 'esl_code';
+    const directItem = {
+      [directCodeKey]: eslCode,
       template_id: Number(officialApi.templateId),
       product,
       ...(officialApi.led ? { led: [{ r: 0, g: 100, b: 0, time_on: 100, time: 5 }] } : {}),
@@ -2438,8 +2448,36 @@ function App() {
       });
     } else if (officialApi.resource === 'product' && officialApi.action === 'create_multiple') {
       payload.f1 = [product];
+    } else if (officialApi.resource === 'product' && officialApi.action === 'del_multiple') {
+      payload.f1 = [officialApi.productCode];
     } else if (officialApi.resource === 'product' && officialApi.action === 'query_with_code') {
       payload.f1 = [officialApi.productCode];
+    } else if (officialApi.resource === 'productadjust' && officialApi.action === 'create_order') {
+      payload.f1 = `${officialApi.productCode || 'ADJ'}-${Date.now().toString(36)}`;
+      payload.f2 = `${officialApi.productName || 'adjust'} 调价单`;
+      payload.f3 = storeCode;
+      payload.f4 = '1,2,3,4,5,6,7';
+      payload.f5 = '00:00';
+      payload.f6 = '23:59';
+      payload.f7 = [{ pc: officialApi.productCode, pp: Number(officialApi.price) }];
+    } else if (officialApi.resource === 'productadjust' && (officialApi.action === 'del_order' || officialApi.action === 'adjust_task')) {
+      payload.f1 = officialApi.productCode;
+    } else if (officialApi.resource === 'store' && officialApi.action === 'create') {
+      payload.f1 = storeCode;
+      payload.f2 = `STORE-${storeCode}`;
+      payload.f3 = 'API experiment store address';
+    } else if (officialApi.resource === 'store' && officialApi.action === 'set') {
+      payload.store_name = `STORE-${storeCode}`;
+      payload.store_address = 'API experiment store address';
+      payload.store_api = { api_enabled: 1, api_code: officialApi.apiName };
+      payload.store_filter = { method: 'b', list: [{ d: eslCode, pid: '0000' }] };
+    } else if (officialApi.resource === 'user' && officialApi.action === 'create') {
+      payload.user_account = officialApi.productCode || 'user001';
+      payload.user_password = officialApi.productCode || 'user001';
+      payload.user_name = officialApi.productName || 'API User';
+      payload.user_mobile = '12345678';
+    } else if (officialApi.resource === 'user' && officialApi.action === 'delete') {
+      payload.user_account = officialApi.productCode || 'user001';
     } else if (officialApi.action === 'direct') {
       payload.f1 = [directItem];
     } else if (officialApi.action === 'bind') {
@@ -2447,14 +2485,11 @@ function App() {
       payload.f2 = officialApi.productCode;
       payload.f3 = String(officialApi.templateId);
     } else if (officialApi.action === 'bind_multiple') {
-      payload.f1 = [{
-        esl_code: eslCode,
-        product_code: officialApi.productCode,
-        product_inner: officialApi.productCode,
-        template_id: String(officialApi.templateId),
-      }];
+      payload.f1 = [bindItem];
     } else if (officialApi.action === 'unbind') {
-      payload.f1 = officialApi.resource === 'esl_ble' ? eslCode : [eslCode];
+      payload.f1 = officialApi.resource === 'esl_ble' || officialApi.resource === 'esl_wifi' || officialApi.resource === 'pad' ? eslCode : [eslCode];
+    } else if (officialApi.action === 'del') {
+      payload.f1 = [eslCode];
     } else if (officialApi.action === 'bind_task' || officialApi.action === 'sync') {
       // No extra fields.
     } else if (officialApi.action === 'search') {
@@ -2468,12 +2503,16 @@ function App() {
       payload.f2 = '20';
     } else if (officialApi.action === 'query_count') {
       // query_count only needs store_code/is_base64/sign.
+    } else if (officialApi.resource === 'query' && officialApi.action === 'env') {
+      delete payload.store_code;
+      delete payload.is_base64;
+      delete payload.sign;
     } else {
       payload.f1 = [directItem];
     }
 
     const targetApId = docCommand.apId || selectedCommandAp?.id || selectedApId || aps[0]?.id || '';
-    const shouldWatchDownlink = ['esl', 'esl_ble'].includes(officialApi.resource)
+    const shouldWatchDownlink = ['esl', 'esl_ble', 'esl_wifi'].includes(officialApi.resource)
       && ['direct', 'bind_task', 'search', 'sync'].includes(officialApi.action);
     const beforeCaptures = targetApId && shouldWatchDownlink ? await loadOfficialDownlinks(targetApId).catch(() => []) : [];
     const beforeIds = new Set(beforeCaptures.map((capture) => capture.id));
@@ -2487,7 +2526,7 @@ function App() {
           apiName: officialApi.apiName,
           resource: officialApi.resource,
           action: officialApi.action,
-          method: officialApi.action === 'query' || officialApi.action === 'query_count' ? 'GET' : 'POST',
+          method: officialApi.resource === 'query' || officialApi.action === 'query' || officialApi.action === 'query_count' ? 'GET' : 'POST',
           payload,
           query: payload,
         }),
@@ -4347,10 +4386,16 @@ function App() {
                   <select value={officialApi.resource} onChange={(event) => setOfficialApi({ ...officialApi, resource: event.target.value })}>
                     <option value="esl_ble">esl_ble</option>
                     <option value="esl">esl</option>
+                    <option value="esl_wifi">esl_wifi</option>
+                    <option value="nfc">nfc</option>
                     <option value="product">product</option>
+                    <option value="productadjust">productadjust 调价单</option>
+                    <option value="store">store 门店/过滤</option>
                     <option value="template">template 墨水屏模板</option>
                     <option value="pad_template">pad_template 彩屏模板</option>
                     <option value="pad">pad</option>
+                    <option value="user">user 门店用户</option>
+                    <option value="query">query/env 环境</option>
                   </select>
                 </label>
                 <label>action
@@ -4368,6 +4413,14 @@ function App() {
                     <option value="query_with_code">query_with_code 查指定商品</option>
                     <option value="create">create 创建/更新商品</option>
                     <option value="create_multiple">create_multiple 批量创建商品</option>
+                    <option value="del">del 删除终端</option>
+                    <option value="del_multiple">del_multiple 批量删商品</option>
+                    <option value="create_order">create_order 创建调价单</option>
+                    <option value="del_order">del_order 删除调价单</option>
+                    <option value="adjust_task">adjust_task 触发调价单</option>
+                    <option value="set">set 设置门店/过滤</option>
+                    <option value="delete">delete 删除用户</option>
+                    <option value="env">env 查询环境</option>
                   </select>
                 </label>
                 <label>sign
@@ -4408,13 +4461,14 @@ function App() {
                 <div>
                   <h3>推荐顺序</h3>
                   <pre>{[
-                    '1. template/query：先查真实 template_id',
-                    '2. esl/query：查看官方库里实际价签编号',
-                    '3. product/query_with_code：确认 product_code 是否存在',
-                    '4. product/create：改 product_code/name 前先创建或更新商品',
-                    '5. esl/direct：使用真实 esl_code + template_id 直接刷新',
-                    '6. 若 direct 不触发，再试 esl/bind -> esl/bind_task',
-                    '7. 观察 OFFICIAL-API、OFFICIAL-WS-DOWN、AP_REPORT_STATUS',
+                    '1. query/env：确认官方服务可访问',
+                    '2. template/query：先查真实 template_id',
+                    '3. esl/query 或 esl_ble/query：查看官方库实际价签编号',
+                    '4. product/query_with_code：确认 product_code 是否存在',
+                    '5. product/create：改 product_code/name 前先创建或更新商品',
+                    '6. esl/direct 或 esl_ble/direct：直接刷新，可勾选 LED',
+                    '7. 若 direct 不触发，再试 esl/bind -> esl/bind_task',
+                    '8. search/sync/bind_task/direct 会自动监听 OFFICIAL-WS-DOWN',
                   ].join('\n')}</pre>
                 </div>
               </div>

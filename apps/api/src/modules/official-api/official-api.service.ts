@@ -216,11 +216,14 @@ export class OfficialApiService {
     const resource = body.resource || 'esl_ble';
     const action = body.action || 'direct';
     const method = body.method || 'POST';
-    const path = `/api/${encodeURIComponent(apiName)}/${encodeURIComponent(resource)}/${encodeURIComponent(action)}`;
+    const isEnvQuery = resource === 'query' && action === 'env';
+    const path = isEnvQuery
+      ? '/api/query/env'
+      : `/api/${encodeURIComponent(apiName)}/${encodeURIComponent(resource)}/${encodeURIComponent(action)}`;
     const url = new URL(`${baseUrl}${path}`);
     const sign = String(body.payload?.sign || body.query?.sign || process.env.OFFICIAL_API_SIGN || '80805d794841f1b4');
     const storeCode = String(body.payload?.store_code || body.query?.store_code || process.env.UPSTREAM_STORE_CODE || '20248517');
-    const common = { store_code: storeCode, is_base64: '0', sign };
+    const common = isEnvQuery ? {} : { store_code: storeCode, is_base64: '0', sign };
 
     let responseText = '';
     let status = 0;
