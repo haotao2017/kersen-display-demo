@@ -22,8 +22,9 @@
     "mqtt-packet": "^9.0.2",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
-    "ws": "^8.18.0",
-    "websocket-stream": "^5.5.2"
+    "sharp": "^0.34.5",
+    "websocket-stream": "^5.5.2",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.4.9",

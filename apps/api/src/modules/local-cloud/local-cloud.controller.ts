@@ -5,12 +5,13 @@ import * as bcrypt from 'bcryptjs';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { extname, join } from 'node:path';
+import { deflateRawSync } from 'node:zlib';
 import { Response } from 'express';
+import sharp = require('sharp');
 import { MemoryStore } from '../../shared/memory-store';
 import { BaseStation, Label } from '../../shared/models';
 import { ApWebsocketService } from '../ap-websocket/ap-websocket.service';
 import { LabelRendererService } from '../labels/label-renderer.service';
-import { buildTaskEsl2Payload } from '../labels/esl-payload';
 import { MqttService } from '../mqtt/mqtt.service';
 
 type Row = Record<string, unknown>;
@@ -33,10 +34,59 @@ type LocalAp = Row & {
   online: boolean;
   updatedAt: string;
 };
+type RenderedTemplateImage = {
+  width: number;
+  height: number;
+  colorMode: string;
+  svg: string;
+  rgba: Buffer;
+  previewImageUrl: string;
+  bindings: Record<string, string>;
+  template: Row;
+};
+type LocalImagePacket = {
+  topic: string;
+  publishTopics: string[];
+  command: Row;
+  payloadBytes: number;
+  imageBytes: number;
+  imageFormat: string;
+  renderMode: string;
+  fit: string;
+  resample: string;
+  dither: boolean;
+  width: number;
+  height: number;
+};
+type ScreenPreset = {
+  width: number;
+  height: number;
+  service: '01-00-00-03' | '01-00-00-0c';
+  magic: number;
+  bpp: 1 | 2;
+  supersize?: boolean;
+  mtu?: number;
+  rotate: number;
+  mirrorX: boolean;
+  mode: string;
+};
 
 const now = () => new Date().toISOString();
 const id = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 const uploadDir = join(process.cwd(), 'uploads');
+const SVG_FONT_STACK = 'Arial, Microsoft YaHei, sans-serif';
+
+const SCREEN_PRESETS: ScreenPreset[] = [
+  { width: 800, height: 480, service: '01-00-00-0c', magic: 0x0c, bpp: 2, supersize: true, mtu: 10000, rotate: 0, mirrorX: false, mode: '0C 800x480' },
+  { width: 648, height: 480, service: '01-00-00-03', magic: 0x0a, bpp: 2, rotate: 0, mirrorX: false, mode: '03-0A 648x480#b0y2r3w1' },
+  { width: 400, height: 300, service: '01-00-00-03', magic: 0x04, bpp: 2, rotate: 0, mirrorX: false, mode: '03-04 400x300#b0y2r3w1' },
+  { width: 240, height: 416, service: '01-00-00-03', magic: 0x04, bpp: 2, rotate: 90, mirrorX: true, mode: '03-04 240x416#b0y2r3w1' },
+  { width: 184, height: 384, service: '01-00-00-03', magic: 0x03, bpp: 2, rotate: 90, mirrorX: false, mode: '03-03 184x384#b0y2r3w1' },
+  { width: 152, height: 296, service: '01-00-00-03', magic: 0x02, bpp: 2, rotate: 90, mirrorX: true, mode: '03-02 152x296#b0y2r3w1' },
+  { width: 128, height: 296, service: '01-00-00-03', magic: 0x02, bpp: 2, rotate: 90, mirrorX: true, mode: '03-02 128x296#b0y2r3w1' },
+  { width: 200, height: 200, service: '01-00-00-03', magic: 0x02, bpp: 2, rotate: 90, mirrorX: false, mode: '03-02 200x200#b0y2r3w1' },
+  { width: 128, height: 250, service: '01-00-00-03', magic: 0x01, bpp: 2, rotate: 90, mirrorX: false, mode: '03-01 128x250#b0y2r3w1' },
+];
 
 function paginate<T>(items: T[], query?: Row) {
   const page = Number(query?.page ?? 1);
@@ -352,7 +402,7 @@ export class LocalCloudController {
   }
 
   @Post('templates/:templateId/preview')
-  previewTemplate(@Param('templateId') templateId: string, @Body() body: Row) {
+  async previewTemplate(@Param('templateId') templateId: string, @Body() body: Row) {
     const template = this.findTemplate(templateId);
     const sampleData = (body.sampleData && typeof body.sampleData === 'object' ? body.sampleData : {}) as Row;
     const label = this.labelFromProduct({
@@ -361,14 +411,15 @@ export class LocalCloudController {
       name: stringValue(sampleData.name, stringValue(template.name, 'Preview Product')),
       price: numberValue(sampleData.price, 19.9),
     });
-    const render = this.renderer.render(label);
+    (label as Label & Row).templateId = templateId;
+    const render = await this.renderTemplateForLabel(label, template);
     return {
-      previewImageUrl: render.png.dataUri,
+      previewImageUrl: render.previewImageUrl,
       renderResult: {
         width: render.width,
         height: render.height,
-        source: 'local-label-renderer',
-        bitmap: render.bitmap,
+        source: 'local-template-renderer',
+        colorMode: render.colorMode,
       },
     };
   }
@@ -763,7 +814,7 @@ export class LocalCloudController {
 
   private async createRefreshTask(deviceId: string, taskType: string, parentTaskId?: string) {
     const label = this.findLabel(deviceId);
-    const render = this.renderer.render(label);
+    const render = await this.renderTemplateForLabel(label);
     const task = {
       id: id('task'),
       taskType,
@@ -775,8 +826,8 @@ export class LocalCloudController {
       renderResult: {
         width: render.width,
         height: render.height,
-        previewImageUrl: render.png.dataUri,
-        bitmap: render.bitmap,
+        colorMode: render.colorMode,
+        previewImageUrl: render.previewImageUrl,
       },
       retryCount: parentTaskId ? 1 : 0,
       status: 'queued',
@@ -800,36 +851,49 @@ export class LocalCloudController {
     return task;
   }
 
-  private async deliverRefreshTask(label: Label, render: ReturnType<LabelRendererService['render']>, taskId: unknown) {
+  private async deliverRefreshTask(label: Label, render: RenderedTemplateImage, taskId: unknown) {
     const apId = this.resolveDeliveryApId(label);
     if (!apId) {
       return { ok: false, reason: '没有在线基站，刷新任务无法下发' };
     }
 
-    const packet = this.buildTaskEsl2Packet(label.storeCode, apId, label.id, render.bgraGzip.bgra_gzip_b64);
+    const packet = await this.buildLocalReadWritePacket(label.storeCode, apId, label.id, render);
     const command = this.db.createCommand({
       storeCode: label.storeCode,
       targetType: 'label',
       targetId: label.id,
       type: 'refresh_label',
-      payload: { source: 'api/v1', taskId, render: { width: render.width, height: render.height } },
+      payload: { source: 'api/v1', taskId, render: { width: render.width, height: render.height }, localProtocol: packet.renderMode },
     });
 
-    const wsResult = this.apWebsocket.sendBinary(apId, packet.payloadBuffer, {
-      type: 'taskESL2',
-      topic: packet.topic,
-      labelId: label.id,
-      imageFormat: 'bgra-gzip',
-    });
+    const wsResult = this.apWebsocket.sendRaw(apId, packet.command);
 
     const mqttResults = await Promise.all(packet.publishTopics.map(async (topic) => {
       try {
-        await this.mqtt.publishBinary(topic, packet.payloadBuffer, { retain: false, qos: 1 });
+        await this.mqtt.publishJson(topic, packet.command, { retain: false });
         return { topic, ok: true };
       } catch (error) {
         return { topic, ok: false, reason: error instanceof Error ? error.message : String(error) };
       }
     }));
+
+    this.db.recordRequest({
+      method: 'LOCAL-IMAGE-DOWNLINK',
+      path: `/ap/${apId}`,
+      statusCode: wsResult.ok ? 200 : 503,
+      body: {
+        trackingId: wsResult.trackingId,
+        apId,
+        labelId: label.id,
+        renderMode: packet.renderMode,
+        imageFormat: packet.imageFormat,
+        payloadBytes: packet.payloadBytes,
+        imageBytes: packet.imageBytes,
+        fit: packet.fit,
+        resample: packet.resample,
+        dither: packet.dither,
+      },
+    });
 
     const mqttOk = mqttResults.some((item) => item.ok);
     command.status = wsResult.ok || mqttOk ? 'sent' : 'failed';
@@ -840,53 +904,275 @@ export class LocalCloudController {
     return {
       ok: wsResult.ok || mqttOk,
       reason: wsResult.ok
-        ? '刷新任务已通过本地 WebSocket 下发，正在等待基站返回执行结果。'
+        ? `已下发（待执行确认），tracking=${wsResult.trackingId}，参数：${packet.renderMode} / ${packet.resample} / dither=${packet.dither}`
         : mqttOk
-          ? '刷新任务已提交到本地 MQTT taskESL2；当前没有可用 WebSocket 连接。'
+          ? `刷新任务已提交到本地 MQTT；当前没有可用 WebSocket 连接。参数：${packet.renderMode} / ${packet.resample} / dither=${packet.dither}`
           : `刷新任务下发失败：WebSocket 不可用，MQTT 发布失败（${mqttResults.find((item) => !item.ok)?.reason ?? 'unknown'}）。`,
       commandId: command.id,
-      transport: wsResult.ok ? 'websocket+mqtt' : mqttOk ? 'mqtt' : 'none',
+      transport: wsResult.ok ? 'websocket-read-write-svc+mqtt' : mqttOk ? 'mqtt' : 'none',
       websocket: wsResult,
       mqtt: mqttResults,
       protocol: {
         topic: packet.topic,
-        alternateTopics: packet.alternateTopics,
-        payloadBytes: packet.payloadBuffer.length,
+        payloadBytes: packet.payloadBytes,
         imageBytes: packet.imageBytes,
+        imageFormat: packet.imageFormat,
+        renderMode: packet.renderMode,
       },
     };
   }
 
-  private buildTaskEsl2Packet(storeCode: string, apId: string, labelId: string, bgraGzipBase64: string) {
+  private async buildLocalReadWritePacket(storeCode: string, apId: string, labelId: string, render: RenderedTemplateImage): Promise<LocalImagePacket> {
     const normalizedAp = apId.trim();
     const apUpper = normalizedAp.toUpperCase();
     const apNoColonUpper = normalizedAp.replace(/:/g, '').toUpperCase();
     const apNoColonLower = normalizedAp.replace(/:/g, '').toLowerCase();
-    const topic = `/estation/${apUpper}/taskESL2`;
+    const topic = `${storeCode}/${normalizedAp}/cmd`;
     const publishTopics = [...new Set([
       topic,
-      `/estation/${normalizedAp}/taskESL2`,
-      `/estation/${apNoColonUpper}/taskESL2`,
-      `/estation/${apNoColonLower}/taskESL2`,
+      `${storeCode}/${apUpper}/cmd`,
+      `${storeCode}/${apNoColonUpper}/cmd`,
+      `${storeCode}/${apNoColonLower}/cmd`,
     ])];
-    const imageBytes = Buffer.from(bgraGzipBase64, 'base64');
-    const protocolPayload = buildTaskEsl2Payload({
-      tagIds: [labelId.trim().toUpperCase()],
-      pattern: 0,
-      pageIndex: 0,
-      imageBytes,
-      compress: true,
-      tokenSeed: Date.now(),
-    });
+    const preset = this.resolveScreenPreset(render);
+    const sourceRgba = preset.service === '01-00-00-0c'
+      ? await this.renderIntoService0cCanvas(render, preset.width, preset.height)
+      : await this.transformRenderedRgba(render.rgba, render.width, render.height, preset.width, preset.height, preset.rotate, preset.mirrorX);
+    const packedRows = preset.bpp === 1
+      ? this.packImage1Bpp(sourceRgba, preset.width, preset.height)
+      : this.packImage2Bpp(sourceRgba, preset.width, preset.height);
+    const imageBytes = this.buildChunkedImageContainer(preset.magic, packedRows);
+    const command: Row = {
+      type: 'READ_WRITE_SVC',
+      opas: [
+        {
+          addr: labelId.trim().toUpperCase(),
+          cmds: [
+            { id: 0, type: 'CONN_DEV' },
+            {
+              id: 16,
+              type: 'WRITE_SVC',
+              service: preset.service,
+              b64dat: imageBytes.toString('base64'),
+              ...(preset.supersize ? { supersize: true, mtu: preset.mtu ?? 10000 } : {}),
+              ...(preset.service === '01-00-00-03' ? { bigsize: preset.bpp !== 1 } : {}),
+            },
+          ],
+        },
+      ],
+    };
+
     return {
       topic,
-      alternateTopics: publishTopics.filter((item) => item !== topic),
       publishTopics,
-      payloadBuffer: Buffer.from(protocolPayload.payloadBytes),
+      command,
+      payloadBytes: Buffer.byteLength(JSON.stringify(command)),
       imageBytes: imageBytes.length,
-      storeCode,
-      apId,
+      imageFormat: `${preset.service}/${preset.bpp}bpp`,
+      renderMode: preset.mode,
+      fit: 'stretch',
+      resample: 'bilinear',
+      dither: true,
+      width: preset.width,
+      height: preset.height,
     };
+  }
+
+  private async renderTemplateForLabel(label: Label, explicitTemplate?: Row): Promise<RenderedTemplateImage> {
+    const row = label as Label & Row;
+    const product = row.productId ? this.db.cloudProducts.get(String(row.productId)) ?? null : null;
+    const template = explicitTemplate
+      ?? (row.templateId ? this.db.cloudTemplates.get(String(row.templateId)) ?? null : null)
+      ?? (product?.defaultTemplateId ? this.db.cloudTemplates.get(String(product.defaultTemplateId)) ?? null : null)
+      ?? this.ensureDefaultTemplate();
+    const schema = (template.schema && typeof template.schema === 'object' ? template.schema : defaultSchema(template)) as Row;
+    const meta = (schema.meta && typeof schema.meta === 'object' ? schema.meta : {}) as Row;
+    const width = numberValue(template.width, numberValue(meta.width, 296));
+    const height = numberValue(template.height, numberValue(meta.height, 128));
+    const colorMode = stringValue(template.colorMode, stringValue(meta.colorMode, 'bwry'));
+    const bindings = this.buildTemplateBindings(label, product);
+    const svg = this.renderTemplateSvg(schema, bindings, width, height);
+    const { data: rgba } = await sharp(Buffer.from(svg))
+      .resize(width, height, { fit: 'fill', kernel: 'linear' })
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const quantized = this.quantizeRgba(Buffer.from(rgba), colorMode);
+    const previewPng = await sharp(quantized, { raw: { width, height, channels: 4 } }).png().toBuffer();
+    return {
+      width,
+      height,
+      colorMode,
+      svg,
+      rgba: quantized,
+      previewImageUrl: `data:image/png;base64,${previewPng.toString('base64')}`,
+      bindings,
+      template,
+    };
+  }
+
+  private buildTemplateBindings(label: Label, product?: Row | null) {
+    const source = product ?? {};
+    const price = numberValue(source.price, label.price);
+    return {
+      id: label.id,
+      eslCode: label.id,
+      sku: stringValue(source.sku, label.sku ?? label.id),
+      barcode: stringValue(source.barcode, label.sku ?? label.id),
+      name: stringValue(source.name, label.title),
+      title: stringValue(source.name, label.title),
+      subName: stringValue(source.subName),
+      brand: stringValue(source.brand),
+      category: stringValue(source.category),
+      price: price.toFixed(2),
+      originalPrice: numberValue(source.originalPrice, price).toFixed(2),
+      memberPrice: numberValue(source.memberPrice, price).toFixed(2),
+      promotionPrice: numberValue(source.promotionPrice, price).toFixed(2),
+      promotionText: stringValue(source.promotionText),
+      unit: stringValue(source.unit),
+      specification: stringValue(source.specification),
+      imageUrl: stringValue(source.imageUrl),
+    };
+  }
+
+  private renderTemplateSvg(schema: Row, bindings: Record<string, string>, width: number, height: number) {
+    const elements = Array.isArray(schema?.elements) ? schema.elements as Row[] : [];
+    const body = elements
+      .filter((item) => item.visible !== false)
+      .sort((left, right) => numberValue(left.zIndex, 0) - numberValue(right.zIndex, 0))
+      .map((item) => this.renderPreviewElement(item, bindings))
+      .join('');
+    return [
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+      '<rect width="100%" height="100%" fill="#ffffff"/>',
+      body,
+      '</svg>',
+    ].join('');
+  }
+
+  private resolveScreenPreset(render: RenderedTemplateImage) {
+    const exact = SCREEN_PRESETS.find((preset) => preset.width === render.width && preset.height === render.height);
+    if (exact) return exact;
+    const rotated = SCREEN_PRESETS.find((preset) => preset.width === render.height && preset.height === render.width);
+    if (rotated) return rotated;
+    return SCREEN_PRESETS[0];
+  }
+
+  private async renderIntoService0cCanvas(render: RenderedTemplateImage, width: number, height: number) {
+    const canvas = Buffer.alloc(width * height * 4, 255);
+    for (let offset = 0; offset < canvas.length; offset += 4) {
+      canvas[offset + 3] = 255;
+    }
+    const targetWidth = Math.min(render.width, width);
+    const targetHeight = Math.min(render.height, height);
+    const image = await sharp(render.rgba, { raw: { width: render.width, height: render.height, channels: 4 } })
+      .resize(targetWidth, targetHeight, { fit: 'fill', kernel: 'linear' })
+      .raw()
+      .toBuffer();
+    return sharp(canvas, { raw: { width, height, channels: 4 } })
+      .composite([{ input: image, raw: { width: targetWidth, height: targetHeight, channels: 4 }, left: Math.floor((width - targetWidth) / 2), top: Math.floor((height - targetHeight) / 2) }])
+      .raw()
+      .toBuffer();
+  }
+
+  private async transformRenderedRgba(rgba: Buffer, sourceWidth: number, sourceHeight: number, width: number, height: number, rotate: number, mirrorX: boolean) {
+    let pipeline = sharp(rgba, { raw: { width: sourceWidth, height: sourceHeight, channels: 4 } });
+    if (rotate) {
+      pipeline = pipeline.rotate(rotate);
+    }
+    if (mirrorX) {
+      pipeline = pipeline.flop();
+    }
+    return pipeline
+      .resize(width, height, { fit: 'fill', kernel: 'linear' })
+      .ensureAlpha()
+      .raw()
+      .toBuffer();
+  }
+
+  private quantizeRgba(rgba: Buffer, colorMode: string) {
+    const output = Buffer.from(rgba);
+    const palette = stringValue(colorMode).includes('y')
+      ? [[0, 0, 0], [255, 255, 255], [255, 214, 0], [255, 0, 0]]
+      : stringValue(colorMode).includes('r')
+        ? [[0, 0, 0], [255, 255, 255], [255, 0, 0]]
+        : [[0, 0, 0], [255, 255, 255]];
+    for (let offset = 0; offset < output.length; offset += 4) {
+      if (output[offset + 3] < 16) {
+        output[offset] = 255;
+        output[offset + 1] = 255;
+        output[offset + 2] = 255;
+        output[offset + 3] = 255;
+        continue;
+      }
+      let best = palette[0];
+      let bestDistance = Number.MAX_SAFE_INTEGER;
+      for (const candidate of palette) {
+        const dr = candidate[0] - output[offset];
+        const dg = candidate[1] - output[offset + 1];
+        const db = candidate[2] - output[offset + 2];
+        const distance = dr * dr + dg * dg + db * db;
+        if (distance < bestDistance) {
+          best = candidate;
+          bestDistance = distance;
+        }
+      }
+      output[offset] = best[0];
+      output[offset + 1] = best[1];
+      output[offset + 2] = best[2];
+      output[offset + 3] = 255;
+    }
+    return output;
+  }
+
+  private packImage2Bpp(rgba: Buffer, width: number, height: number) {
+    const output = Buffer.alloc(Math.ceil(width * height / 4), 0x55);
+    for (let pixel = 0; pixel < width * height; pixel += 1) {
+      const offset = pixel * 4;
+      const code = this.colorCode2Bpp(rgba[offset], rgba[offset + 1], rgba[offset + 2]);
+      const byteIndex = Math.floor(pixel / 4);
+      const shift = (3 - (pixel % 4)) * 2;
+      output[byteIndex] = (output[byteIndex] & ~(0b11 << shift)) | ((code & 3) << shift);
+    }
+    return output;
+  }
+
+  private colorCode2Bpp(r: number, g: number, b: number) {
+    if (r < 80 && g < 80 && b < 80) return 0;
+    if (r > 190 && g > 150 && b < 90) return 2;
+    if (r > 180 && g < 110 && b < 110) return 3;
+    return 1;
+  }
+
+  private packImage1Bpp(rgba: Buffer, width: number, height: number) {
+    const rowBytes = Math.ceil(width / 8);
+    const output = Buffer.alloc(rowBytes * height);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const offset = (y * width + x) * 4;
+        const lum = rgba[offset] * 0.299 + rgba[offset + 1] * 0.587 + rgba[offset + 2] * 0.114;
+        if (lum < 160) {
+          output[y * rowBytes + Math.floor(x / 8)] |= 1 << (7 - (x % 8));
+        }
+      }
+    }
+    return output;
+  }
+
+  private buildChunkedImageContainer(magic: number, rows: Buffer) {
+    const parts = [Buffer.from([0xa5, 0xa6, magic, 0x02])];
+    const chunkSize = 8192;
+    let chunkId = 1;
+    for (let offset = 0; offset < rows.length; offset += chunkSize) {
+      const chunk = rows.subarray(offset, Math.min(rows.length, offset + chunkSize));
+      const compressed = deflateRawSync(chunk, { level: 9 });
+      const header = Buffer.alloc(3);
+      header[0] = chunkId;
+      header.writeUInt16LE(compressed.length, 1);
+      parts.push(header, compressed);
+      chunkId += 1;
+    }
+    return Buffer.concat(parts);
   }
 
   private resolveDeliveryApId(label: Label) {
@@ -913,29 +1199,27 @@ export class LocalCloudController {
     const meta = (schema?.meta && typeof schema.meta === 'object' ? schema.meta : {}) as Row;
     const width = numberValue(meta.width, 296);
     const height = numberValue(meta.height, 128);
-    const elements = Array.isArray(schema?.elements) ? schema.elements as Row[] : [];
-    const body = elements
-      .filter((item) => item.visible !== false)
-      .sort((left, right) => numberValue(left.zIndex, 0) - numberValue(right.zIndex, 0))
-      .map((item) => this.renderPreviewElement(item))
-      .join('');
-    return [
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
-      '<rect width="100%" height="100%" fill="#ffffff"/>',
-      body,
-      '</svg>',
-    ].join('');
+    return this.renderTemplateSvg(schema, {
+      name: '商品名称',
+      title: '商品名称',
+      price: '19.90',
+      sku: 'SKU',
+      barcode: '6900000000000',
+      imageUrl: '',
+    }, width, height);
   }
 
-  private renderPreviewElement(item: Row) {
+  private renderPreviewElement(item: Row, bindings: Record<string, string> = {}) {
     const type = String(item.type ?? 'text');
     const x = numberValue(item.x, 0);
     const y = numberValue(item.y, 0);
     const width = numberValue(item.width, 80);
     const height = numberValue(item.height, 24);
     const style = (item.style && typeof item.style === 'object' ? item.style : {}) as Row;
+    const bindingField = stringValue(item.bindingField);
+    const boundText = bindingField ? stringValue(bindings[bindingField]) : '';
     if (type === 'image') {
-      const href = stringValue(item.expression);
+      const href = bindingField === 'imageUrl' && bindings.imageUrl ? bindings.imageUrl : stringValue(item.expression);
       return href ? `<image href="${escapeXml(href)}" x="${x}" y="${y}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid slice"/>` : '';
     }
     if (type === 'rect') {
@@ -945,18 +1229,19 @@ export class LocalCloudController {
       return `<line x1="${x}" y1="${y}" x2="${x + width}" y2="${y + height}" stroke="${escapeXml(style.stroke ?? '#111111')}" stroke-width="${numberValue(style.strokeWidth, 1)}"/>`;
     }
     if (type === 'barcode') {
-      return `<rect x="${x}" y="${y}" width="${width}" height="${Math.max(1, height - 14)}" fill="#111111"/><text x="${x + width / 2}" y="${y + height}" text-anchor="middle" font-size="10" fill="#111111">${escapeXml(item.expression ?? item.bindingField ?? 'barcode')}</text>`;
+      return `<rect x="${x}" y="${y}" width="${width}" height="${Math.max(1, height - 14)}" fill="#111111"/><text x="${x + width / 2}" y="${y + height}" text-anchor="middle" font-size="10" fill="#111111">${escapeXml(boundText || item.expression || item.bindingField || 'barcode')}</text>`;
     }
     const fontSize = numberValue(style.fontSize, type === 'price' ? 28 : 14);
     const fontWeight = String(style.fontWeight ?? '') === 'bold' ? '700' : '400';
     const fill = escapeXml(style.fill ?? '#111111');
-    const text = type === 'price' ? '￥19.90' : stringValue(item.expression, String(item.bindingField ?? type));
-    return `<text x="${x}" y="${y + fontSize}" font-size="${fontSize}" font-weight="${fontWeight}" font-family="Arial, sans-serif" fill="${fill}">${escapeXml(text)}</text>`;
+    const text = type === 'price' ? `￥${boundText || '19.90'}` : (boundText || stringValue(item.expression, String(item.bindingField ?? type)));
+    return `<text x="${x}" y="${y + fontSize}" font-size="${fontSize}" font-weight="${fontWeight}" font-family="${SVG_FONT_STACK}" fill="${fill}">${escapeXml(text)}</text>`;
   }
 
   private ensureDefaultTemplate() {
-    if (this.db.cloudTemplates.size > 0) return;
-    this.upsertTemplate({
+    const existing = [...this.db.cloudTemplates.values()][0];
+    if (existing) return existing;
+    return this.upsertTemplate({
       id: 'template_default_296x128',
       code: 'DEFAULT_296_128',
       name: 'Kersen 296x128 默认模板',
@@ -991,6 +1276,7 @@ export class LocalCloudController {
     const row = label as Label & Row;
     const product = row.productId ? this.db.cloudProducts.get(String(row.productId)) ?? null : null;
     const template = row.templateId ? this.db.cloudTemplates.get(String(row.templateId)) ?? null : null;
+    const preset = this.resolveDevicePreset(stringValue(row.deviceType), template);
     return {
       id: label.id,
       eslCode: label.id,
@@ -998,9 +1284,9 @@ export class LocalCloudController {
       apId: label.apId,
       productId: row.productId,
       templateId: row.templateId,
-      deviceType: stringValue(row.deviceType, 'KERSEN_296_128'),
-      screenWidth: 296,
-      screenHeight: 128,
+      deviceType: stringValue(row.deviceType, stringValue(template?.deviceType, preset.deviceType)),
+      screenWidth: numberValue(row.screenWidth, numberValue(template?.width, preset.width)),
+      screenHeight: numberValue(row.screenHeight, numberValue(template?.height, preset.height)),
       battery: label.battery ?? 100,
       signal: label.rssi ?? 0,
       bindStatus: row.productId || row.templateId ? 'bound' : 'unbound',
@@ -1016,6 +1302,31 @@ export class LocalCloudController {
 
   private localAps(): LocalAp[] {
     return [...this.db.baseStations.values()].map((ap) => this.localAp(ap));
+  }
+
+  private resolveDevicePreset(deviceType?: string, template?: Row | null) {
+    const normalized = stringValue(deviceType).toUpperCase();
+    const byType: Record<string, { deviceType: string; width: number; height: number }> = {
+      ET0154: { deviceType: 'ET0154-80', width: 200, height: 200 },
+      'ET0154-80': { deviceType: 'ET0154-80', width: 200, height: 200 },
+      ET0213: { deviceType: 'ET0213-81', width: 250, height: 122 },
+      'ET0213-81': { deviceType: 'ET0213-81', width: 250, height: 122 },
+      ET0266: { deviceType: 'ET0266-82', width: 296, height: 152 },
+      'ET0266-82': { deviceType: 'ET0266-82', width: 296, height: 152 },
+      ET0290: { deviceType: 'ET0290-84', width: 296, height: 128 },
+      'ET0290-84': { deviceType: 'ET0290-84', width: 296, height: 128 },
+      ET0420: { deviceType: 'ET0420-87', width: 400, height: 300 },
+      'ET0420-87': { deviceType: 'ET0420-87', width: 400, height: 300 },
+      ET0580: { deviceType: 'ET0580-88', width: 648, height: 480 },
+      'ET0580-88': { deviceType: 'ET0580-88', width: 648, height: 480 },
+      ET0750: { deviceType: 'ET0750-89', width: 800, height: 480 },
+      'ET0750-89': { deviceType: 'ET0750-89', width: 800, height: 480 },
+    };
+    return byType[normalized] ?? {
+      deviceType: stringValue(template?.deviceType, 'KERSEN_296_128'),
+      width: numberValue(template?.width, 296),
+      height: numberValue(template?.height, 128),
+    };
   }
 
   private localAp(ap: BaseStation): LocalAp;

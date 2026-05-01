@@ -1506,21 +1506,71 @@ export class ApWebsocketService {
     const events = Array.isArray(task.events) ? task.events as Array<Record<string, unknown>> : [];
     const reply = trace.reply && typeof trace.reply === 'object' ? trace.reply as Record<string, unknown> : undefined;
     const payload = reply?.payload && typeof reply.payload === 'object' ? reply.payload as Record<string, unknown> : undefined;
-    const errno = Number(payload?.errno ?? payload?.errcode ?? payload?.code);
-    const replyText = JSON.stringify(reply ?? {});
-    const failed = trace.status === 'socket_write_error'
-      || trace.status === 'socket_missing'
-      || (Number.isFinite(errno) && errno !== 0)
-      || /fail|error/i.test(replyText);
-    const success = trace.status === 'ap_reply_seen' && !failed;
-    const nextStatus = success ? 'success' : failed ? 'failed' : trace.status === 'socket_write_ok' ? 'sending' : String(task.status ?? 'sent');
-    const resultMsg = success
-      ? '基站已返回执行结果，任务判定为成功。'
-      : failed
-        ? `基站返回失败或下发失败：${trace.error ?? replyText.slice(0, 240)}`
-        : trace.status === 'socket_write_ok'
-          ? 'WebSocket 已写入，正在等待基站执行结果。'
-          : String(task.resultMsg ?? '等待基站返回结果。');
+    const cmd = payload?.cmd && typeof payload.cmd === 'object' ? payload.cmd as Record<string, unknown> : undefined;
+    const res = payload?.res && typeof payload.res === 'object' ? payload.res as Record<string, unknown> : undefined;
+    const rawCmdType = typeof payload?.cmd === 'string' ? payload.cmd : undefined;
+    const replyType = String(reply?.type ?? payload?.type ?? '');
+    const cmdType = String(reply?.cmdType ?? cmd?.type ?? rawCmdType ?? '');
+    const toNumber = (...values: unknown[]) => {
+      for (const value of values) {
+        const num = Number(value);
+        if (Number.isFinite(num)) {
+          return num;
+        }
+      }
+      return undefined;
+    };
+    const errno = toNumber(payload?.errno, payload?.errcode, payload?.error_no, payload?.err_no, res?.errno, res?.errcode, res?.error_no, res?.err_no, cmd?.errno, cmd?.errcode);
+    const ack = toNumber(payload?.ack_pkt_num, payload?.ackPktNum, payload?.ack_pkt, payload?.ack, res?.ack_pkt_num, res?.ackPktNum, res?.ack_pkt, res?.ack, cmd?.ack_pkt_num, cmd?.ackPktNum, cmd?.ack_pkt, cmd?.ack);
+    const send = toNumber(payload?.send_pkt_num, payload?.sendPktNum, payload?.send_pkt, payload?.send, res?.send_pkt_num, res?.sendPktNum, res?.send_pkt, res?.send, cmd?.send_pkt_num, cmd?.sendPktNum, cmd?.send_pkt, cmd?.send);
+    const writeMs = toNumber(payload?.write_time_ms, payload?.writeTimeMs, payload?.write_ms, payload?.write, res?.write_time_ms, res?.writeTimeMs, res?.write_ms, res?.write, cmd?.write_time_ms, cmd?.writeTimeMs, cmd?.write_ms, cmd?.write);
+    const rwTaskRest = toNumber(payload?.rw_task_rest, payload?.rwTaskRest);
+    const ackSendText = `ack/send=${ack ?? '-'} / ${send ?? '-'}`;
+    const errnoText = `errno=${errno ?? '-'}`;
+    const writeText = writeMs === undefined ? '' : ` · write=${writeMs}ms`;
+    const replyPrefix = `trace 状态：${trace.status} · AP 回包：${replyType || '-'}`;
+
+    let nextStatus = String(task.status ?? 'sent');
+    let resultMsg = String(task.resultMsg ?? '等待基站返回结果。');
+
+    if (trace.status === 'socket_missing' || trace.status === 'socket_write_error') {
+      nextStatus = 'failed';
+      resultMsg = `下发失败：${trace.error ?? 'WebSocket 不可用'}`;
+    } else if (trace.status === 'socket_write_ok') {
+      nextStatus = 'sending';
+      resultMsg = `已下发（待执行确认），tracking=${trace.id}`;
+    } else if (trace.status === 'ap_reply_seen' && replyType === 'READ_WRITE_SVC' && cmdType === 'WRITE_SVC') {
+      const ackSendOk = ack === undefined || send === undefined || ack === send;
+      if (errno === 0 && ackSendOk) {
+        nextStatus = 'success';
+        resultMsg = `执行确认成功：${replyPrefix} · cmd=WRITE_SVC · ${ackSendText} · ${errnoText}${writeText} · 执行确认成功（已收到设备执行结果（errno=0））`;
+      } else {
+        nextStatus = 'failed';
+        const reason = errno !== undefined && errno !== 0
+          ? `设备执行失败（errno=${errno}）`
+          : ack !== undefined && send !== undefined && ack !== send
+            ? '设备确认包数量不一致'
+            : '设备执行结果异常';
+        resultMsg = `执行确认失败：${replyPrefix} · cmd=WRITE_SVC · ${ackSendText} · ${errnoText}${writeText} · ${reason}`;
+      }
+    } else if (trace.status === 'ap_reply_seen' && replyType === 'AP_REPORT_STATUS') {
+      if (rwTaskRest === 0) {
+        const elapsedMs = Date.now() - new Date(trace.createdAt).getTime();
+        if (elapsedMs >= Number(process.env.AP_WRITE_SVC_CONFIRM_TIMEOUT_MS ?? 20_000)) {
+          nextStatus = 'timeout';
+          resultMsg = `执行确认超时：${replyPrefix} · rw_task_rest=0 · AP 队列已清空，但本次 trace 尚未看到 WRITE_SVC 执行结果`;
+        } else {
+          nextStatus = 'sending';
+          resultMsg = `已下发（待执行确认）：${replyPrefix} · rw_task_rest=0 · AP 队列已清空，继续等待 WRITE_SVC 执行结果`;
+        }
+      } else {
+        nextStatus = 'sending';
+        resultMsg = `已下发（待执行确认）：${replyPrefix} · rw_task_rest=${rwTaskRest ?? '-'} · AP 队列仍有任务，继续等待 WRITE_SVC 执行结果`;
+      }
+    } else if (trace.status === 'ap_reply_seen') {
+      nextStatus = 'sending';
+      resultMsg = `已收到基站回包但尚未确认执行结果：${replyPrefix} · 等待 READ_WRITE_SVC / WRITE_SVC`;
+    }
 
     task.status = nextStatus;
     task.resultMsg = resultMsg;
