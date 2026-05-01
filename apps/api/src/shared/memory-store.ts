@@ -14,6 +14,9 @@ export class MemoryStore {
   readonly baseStations = new Map<string, BaseStation>();
   readonly labels = new Map<string, Label>();
   readonly commands = new Map<string, EslCommand>();
+  readonly cloudProducts = new Map<string, Record<string, unknown>>();
+  readonly cloudTemplates = new Map<string, Record<string, unknown>>();
+  readonly cloudTasks = new Map<string, Record<string, unknown>>();
   readonly requestLogs: RequestLog[] = [];
   readonly officialDownlinkCaptures: OfficialDownlinkCapture[] = [];
   readonly apSessions = new Map<string, { storeCode: string; apId: string; createdAt: string; source: 'local' | 'official' }>();
@@ -107,6 +110,9 @@ export class MemoryStore {
           baseStations: [...this.baseStations.values()],
           labels: [...this.labels.values()],
           commands: [...this.commands.values()],
+          cloudProducts: [...this.cloudProducts.values()],
+          cloudTemplates: [...this.cloudTemplates.values()],
+          cloudTasks: [...this.cloudTasks.values()],
           requestLogs: this.requestLogs,
           officialDownlinkCaptures: this.officialDownlinkCaptures,
         },
@@ -126,6 +132,9 @@ export class MemoryStore {
       baseStations?: BaseStation[];
       labels?: Label[];
       commands?: EslCommand[];
+      cloudProducts?: Array<Record<string, unknown>>;
+      cloudTemplates?: Array<Record<string, unknown>>;
+      cloudTasks?: Array<Record<string, unknown>>;
       requestLogs?: RequestLog[];
       officialDownlinkCaptures?: OfficialDownlinkCapture[];
     };
@@ -143,6 +152,9 @@ export class MemoryStore {
     data.baseStations?.forEach((item) => this.baseStations.set(item.id, item));
     data.labels?.forEach((item) => this.labels.set(item.id, item));
     data.commands?.forEach((item) => this.commands.set(item.id, item));
+    data.cloudProducts?.forEach((item) => this.cloudProducts.set(String(item.id), item));
+    data.cloudTemplates?.forEach((item) => this.cloudTemplates.set(String(item.id), item));
+    data.cloudTasks?.forEach((item) => this.cloudTasks.set(String(item.id), item));
     this.requestLogs.push(...(data.requestLogs ?? []));
     this.officialDownlinkCaptures.push(...(data.officialDownlinkCaptures ?? []));
     return true;

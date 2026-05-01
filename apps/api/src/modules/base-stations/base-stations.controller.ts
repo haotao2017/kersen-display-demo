@@ -34,50 +34,6 @@ class RawWsCommandDto {
   payload!: Record<string, unknown>;
 }
 
-class ReplayOfficialDownlinkDto {
-  @IsOptional()
-  @IsString()
-  targetLabelId?: string;
-
-  @IsOptional()
-  @IsString()
-  replacementService03B64?: string;
-
-  @IsOptional()
-  @IsString()
-  replacementService07B64?: string;
-
-  @IsOptional()
-  @IsString()
-  replacementService0cB64?: string;
-
-  @IsOptional()
-  service03ByteOffset?: number;
-
-  @IsOptional()
-  service03ByteXor?: number;
-
-  @IsOptional()
-  @IsString()
-  spliceSourceCaptureId?: string;
-
-  @IsOptional()
-  spliceOffset?: number;
-}
-
-class DiffOfficialDownlinkDto {
-  @IsString()
-  leftId!: string;
-
-  @IsString()
-  rightId!: string;
-}
-
-class StructureOfficialDownlinkDto {
-  @IsOptional()
-  captureIds?: string[];
-}
-
 function offlineAfterMs() {
   return Number(process.env.AP_OFFLINE_AFTER_SECONDS ?? 90) * 1000;
 }
@@ -152,49 +108,6 @@ export class BaseStationsController {
   @Get(':id/downlink-traces/:traceId')
   downlinkTrace(@Param('id') id: string, @Param('traceId') traceId: string) {
     return this.apWebsocket.getDownlinkTrace(id, traceId) ?? { ok: false, reason: 'trace_not_found', traceId };
-  }
-
-  @UseGuards(AuthGuard)
-  @Get(':id/official-downlinks')
-  officialDownlinks(@Param('id') id: string) {
-    return this.apWebsocket.getOfficialDownlinks(id);
-  }
-
-  @UseGuards(AuthGuard)
-  @Get(':id/official-downlinks/analysis')
-  officialDownlinkAnalysis(@Param('id') id: string) {
-    return this.apWebsocket.analyzeOfficialDownlinks(id);
-  }
-
-  @UseGuards(AuthGuard)
-  @Post(':id/official-downlinks/structure')
-  officialDownlinkStructure(@Param('id') id: string, @Body() dto: StructureOfficialDownlinkDto) {
-    return this.apWebsocket.analyzeOfficialDownlinkStructure(id, dto.captureIds);
-  }
-
-  @UseGuards(AuthGuard)
-  @Post(':id/official-downlinks/:captureId/replay')
-  replayOfficialDownlink(
-    @Param('id') id: string,
-    @Param('captureId') captureId: string,
-    @Body() dto: ReplayOfficialDownlinkDto,
-  ) {
-    return this.apWebsocket.replayOfficialDownlink(id, captureId, {
-      targetLabelId: dto.targetLabelId,
-      replacementService03B64: dto.replacementService03B64,
-      replacementService07B64: dto.replacementService07B64,
-      replacementService0cB64: dto.replacementService0cB64,
-      service03ByteOffset: dto.service03ByteOffset,
-      service03ByteXor: dto.service03ByteXor,
-      spliceSourceCaptureId: dto.spliceSourceCaptureId,
-      spliceOffset: dto.spliceOffset,
-    });
-  }
-
-  @UseGuards(AuthGuard)
-  @Post(':id/official-downlinks/diff')
-  diffOfficialDownlinks(@Param('id') id: string, @Body() dto: DiffOfficialDownlinkDto) {
-    return this.apWebsocket.diffOfficialDownlinks(id, dto.leftId, dto.rightId);
   }
 
   @UseGuards(AuthGuard)

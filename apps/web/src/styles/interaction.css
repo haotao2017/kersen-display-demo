@@ -1,0 +1,75 @@
+:root {
+  --interactive-press-scale: 0.985;
+  --interactive-shadow: 0 10px 24px rgba(166, 75, 42, 0.14);
+  --interactive-shadow-soft: 0 6px 16px rgba(15, 23, 42, 0.08);
+}
+
+.ant-btn,
+.ant-card,
+.ant-input,
+.ant-input-number,
+.ant-select-selector,
+.ant-menu-item,
+.ant-upload,
+.ant-pagination-item {
+  transition:
+    transform 0.16s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease,
+    background-color 0.18s ease,
+    color 0.18s ease,
+    opacity 0.18s ease;
+}
+
+.ant-btn:not(:disabled):hover,
+.ant-upload:hover,
+.ant-pagination-item:hover,
+.ant-menu-item:hover {
+  box-shadow: var(--interactive-shadow-soft);
+}
+
+.ant-btn:not(:disabled):active,
+.ant-upload:active,
+.ant-pagination-item:active,
+.ant-menu-item:active {
+  transform: translateY(1px) scale(var(--interactive-press-scale));
+}
+
+.ant-btn:focus-visible,
+.ant-input:focus-visible,
+.ant-input-number:focus-within,
+.ant-select-focused .ant-select-selector {
+  outline: 2px solid rgba(166, 75, 42, 0.22);
+  outline-offset: 2px;
+}
+
+.ant-btn-loading {
+  box-shadow: var(--interactive-shadow);
+}
+
+.ant-btn-primary:not(:disabled):hover {
+  box-shadow: var(--interactive-shadow);
+}
+
+.ant-btn[disabled],
+.ant-btn-disabled {
+  opacity: 0.64;
+}
+
+.ant-table-wrapper .ant-btn + .ant-btn {
+  margin-left: 0;
+}
+
+.designer-tool-card {
+  transition: transform 0.16s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+.designer-tool-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 22px rgba(15, 23, 42, 0.08);
+  border-color: #d6dfeb !important;
+}
+
+.designer-tool-card:active {
+  transform: translateY(1px) scale(0.99);
+}

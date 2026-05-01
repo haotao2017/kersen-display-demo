@@ -8,5 +8,6 @@ import { LabelsController } from './labels.controller';
   imports: [ApWebsocketModule, MqttModule],
   controllers: [LabelsController],
   providers: [LabelRendererService],
+  exports: [LabelRendererService],
 })
 export class LabelsModule {}

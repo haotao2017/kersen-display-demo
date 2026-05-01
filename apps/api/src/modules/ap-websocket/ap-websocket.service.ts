@@ -300,7 +300,7 @@ function summarizeWsPayload(message: RawData | string) {
 }
 
 function officialProxyEnabled() {
-  return process.env.AP_PROXY_OFFICIAL === 'true';
+  return false;
 }
 
 function officialWsUrl(requestUrl: string, host?: string, token?: string) {
@@ -1492,6 +1492,64 @@ export class ApWebsocketService {
       statusCode: status === 'socket_write_error' || status === 'socket_missing' ? 503 : 200,
       body: trace,
     });
+    this.updateTaskFromDownlinkTrace(trace);
+  }
+
+  private updateTaskFromDownlinkTrace(trace: DownlinkTrace) {
+    const task = [...this.db.cloudTasks.values()].find((item) => {
+      const delivery = item.delivery && typeof item.delivery === 'object' ? item.delivery as Record<string, unknown> : undefined;
+      const websocket = delivery?.websocket && typeof delivery.websocket === 'object' ? delivery.websocket as Record<string, unknown> : undefined;
+      return websocket?.trackingId === trace.id;
+    });
+    if (!task) return;
+
+    const events = Array.isArray(task.events) ? task.events as Array<Record<string, unknown>> : [];
+    const reply = trace.reply && typeof trace.reply === 'object' ? trace.reply as Record<string, unknown> : undefined;
+    const payload = reply?.payload && typeof reply.payload === 'object' ? reply.payload as Record<string, unknown> : undefined;
+    const errno = Number(payload?.errno ?? payload?.errcode ?? payload?.code);
+    const replyText = JSON.stringify(reply ?? {});
+    const failed = trace.status === 'socket_write_error'
+      || trace.status === 'socket_missing'
+      || (Number.isFinite(errno) && errno !== 0)
+      || /fail|error/i.test(replyText);
+    const success = trace.status === 'ap_reply_seen' && !failed;
+    const nextStatus = success ? 'success' : failed ? 'failed' : trace.status === 'socket_write_ok' ? 'sending' : String(task.status ?? 'sent');
+    const resultMsg = success
+      ? '基站已返回执行结果，任务判定为成功。'
+      : failed
+        ? `基站返回失败或下发失败：${trace.error ?? replyText.slice(0, 240)}`
+        : trace.status === 'socket_write_ok'
+          ? 'WebSocket 已写入，正在等待基站执行结果。'
+          : String(task.resultMsg ?? '等待基站返回结果。');
+
+    task.status = nextStatus;
+    task.resultMsg = resultMsg;
+    task.updatedAt = new Date().toISOString();
+    task.events = [
+      ...events,
+      {
+        id: `${trace.id}_${trace.updatedAt}`,
+        time: trace.updatedAt,
+        status: trace.status,
+        message: resultMsg,
+        trace: {
+          id: trace.id,
+          transport: trace.transport,
+          bytes: trace.bytes,
+          commandType: trace.commandType,
+          labelId: trace.labelId,
+          queueId: trace.queueId,
+          reply,
+          error: trace.error,
+        },
+      },
+    ].slice(-30);
+    task.delivery = {
+      ...(task.delivery && typeof task.delivery === 'object' ? task.delivery as Record<string, unknown> : {}),
+      downlinkTrace: trace,
+    };
+    this.db.cloudTasks.set(String(task.id), task);
+    this.db.save();
   }
 
   private extractCommandMeta(payload: unknown) {
@@ -1747,7 +1805,9 @@ export class ApWebsocketService {
 
     for (const [labelId, payload] of entries) {
       const current = this.db.labels.get(labelId);
-      const label: Label = {
+      const currentRow = (current ?? {}) as Label & Record<string, unknown>;
+      const label: Label & Record<string, unknown> = {
+        ...currentRow,
         id: labelId,
         storeCode,
         apId,
@@ -1787,8 +1847,10 @@ export class ApWebsocketService {
 
     const ap = [...this.db.baseStations.values()].find((item) => item.status === 'online');
     const current = this.db.labels.get(labelId);
+    const currentRow = (current ?? {}) as Label & Record<string, unknown>;
     const services = Object.fromEntries((message.service_list ?? []).map((item) => [item.service ?? 'unknown', item.b64dat ?? '']));
     this.db.labels.set(labelId, {
+      ...currentRow,
       id: labelId,
       storeCode: current?.storeCode ?? ap?.storeCode ?? process.env.UPSTREAM_STORE_CODE ?? '20248517',
       apId: current?.apId ?? ap?.id,
