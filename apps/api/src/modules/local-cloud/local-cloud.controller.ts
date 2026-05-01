@@ -1243,13 +1243,29 @@ export class LocalCloudController {
       return `<line x1="${x}" y1="${y}" x2="${x + width}" y2="${y + height}" stroke="${escapeXml(style.stroke ?? '#111111')}" stroke-width="${numberValue(style.strokeWidth, 1)}"/>`;
     }
     if (type === 'barcode') {
-      return `<rect x="${x}" y="${y}" width="${width}" height="${Math.max(1, height - 14)}" fill="#111111"/><text x="${x + width / 2}" y="${y + height}" text-anchor="middle" font-size="10" fill="#111111">${escapeXml(boundText || item.expression || item.bindingField || 'barcode')}</text>`;
+      const fill = escapeXml(style.fill ?? '#111111');
+      const stroke = escapeXml(style.stroke ?? '#111111');
+      const background = escapeXml(style.background ?? '#ffffff');
+      const text = escapeXml(boundText || stringValue(item.expression, stringValue(item.bindingField, 'barcode')));
+      return `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${background}" stroke="${stroke}" stroke-width="1"/><rect x="${x + 4}" y="${y + 4}" width="${Math.max(1, width - 8)}" height="${Math.max(1, height - 20)}" fill="${fill}"/><text x="${x + width / 2}" y="${y + height - 4}" text-anchor="middle" font-size="10" font-family="${SVG_FONT_STACK}" fill="${fill}">${text}</text>`;
+    }
+    if (type === 'qrcode') {
+      const fill = escapeXml(style.fill ?? '#111111');
+      const stroke = escapeXml(style.stroke ?? '#111111');
+      const background = escapeXml(style.background ?? '#ffffff');
+      const text = escapeXml(boundText || stringValue(item.expression, stringValue(item.bindingField, 'QR')));
+      return `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${background}" stroke="${stroke}" stroke-width="1"/><text x="${x + width / 2}" y="${y + height / 2 + 6}" text-anchor="middle" font-size="${Math.min(18, Math.max(10, Math.floor(height / 4)))}" font-weight="700" font-family="${SVG_FONT_STACK}" fill="${fill}">${text}</text>`;
     }
     const fontSize = numberValue(style.fontSize, type === 'price' ? 28 : 14);
     const fontWeight = String(style.fontWeight ?? '') === 'bold' ? '700' : '400';
     const fill = escapeXml(style.fill ?? '#111111');
+    const stroke = escapeXml(style.stroke ?? '#111111');
+    const background = escapeXml(style.background ?? '#ffffff');
+    const textAlign = String(style.textAlign ?? 'left');
+    const textAnchor = textAlign === 'center' ? 'middle' : textAlign === 'right' ? 'end' : 'start';
+    const textX = textAlign === 'center' ? x + width / 2 : textAlign === 'right' ? x + width - 4 : x + 4;
     const text = type === 'price' ? `￥${boundText || '19.90'}` : (boundText || stringValue(item.expression, String(item.bindingField ?? type)));
-    return `<text x="${x}" y="${y + fontSize}" font-size="${fontSize}" font-weight="${fontWeight}" font-family="${SVG_FONT_STACK}" fill="${fill}">${escapeXml(text)}</text>`;
+    return `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${background}" stroke="${stroke}" stroke-width="1"/><text x="${textX}" y="${y + fontSize}" text-anchor="${textAnchor}" font-size="${fontSize}" font-weight="${fontWeight}" font-family="${SVG_FONT_STACK}" fill="${fill}">${escapeXml(text)}</text>`;
   }
 
   private async resolveImageDataUri(value: string) {

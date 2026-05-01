@@ -696,6 +696,17 @@ const DesignerElementNode = ({
 
   return (
     <>
+      <Rect
+        key={`${element.id}-text-bg`}
+        x={20 + element.x}
+        y={20 + element.y}
+        width={element.width}
+        height={element.height}
+        fill={background}
+        stroke={activeStroke}
+        strokeWidth={1}
+        listening={false}
+      />
       <Text
         key={element.id}
         ref={setNode}
@@ -706,7 +717,7 @@ const DesignerElementNode = ({
         fontSize={Number(element.style.fontSize ?? 14)}
         fontStyle={String(element.style.fontWeight) === 'bold' ? 'bold' : 'normal'}
         align={String(element.style.textAlign ?? 'left') as 'left' | 'center' | 'right'}
-        fill={isSelected ? '#1677ff' : isHovering ? '#3b82f6' : fill}
+        fill={fill}
         shadowColor={activeShadow}
         shadowBlur={isSelected ? 8 : isHovering ? 4 : 0}
       />
@@ -2002,6 +2013,44 @@ export const TemplateDesignerPage = () => {
                                   height: 26,
                                   borderRadius: 8,
                                   border: selectedStyle.fill === color.value ? '2px solid #1677ff' : '1px solid #d8dee8',
+                                  background: color.value,
+                                  cursor: 'pointer',
+                                }}
+                              />
+                            ))}
+                          </div>
+                        </Form.Item>
+                        <Form.Item label={tx('背景颜色', 'Background Color')}>
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            {DESIGNER_COLOR_SWATCHES.map((color) => (
+                              <button
+                                key={color.value}
+                                type="button"
+                                onClick={() => updateElement(selectedElement.id, { style: { ...selectedStyle, background: color.value } })}
+                                style={{
+                                  width: 26,
+                                  height: 26,
+                                  borderRadius: 8,
+                                  border: selectedStyle.background === color.value ? '2px solid #1677ff' : '1px solid #d8dee8',
+                                  background: color.value,
+                                  cursor: 'pointer',
+                                }}
+                              />
+                            ))}
+                          </div>
+                        </Form.Item>
+                        <Form.Item label={tx('边框颜色', 'Border Color')}>
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            {DESIGNER_COLOR_SWATCHES.map((color) => (
+                              <button
+                                key={color.value}
+                                type="button"
+                                onClick={() => updateElement(selectedElement.id, { style: { ...selectedStyle, stroke: color.value } })}
+                                style={{
+                                  width: 26,
+                                  height: 26,
+                                  borderRadius: 8,
+                                  border: selectedStyle.stroke === color.value ? '2px solid #1677ff' : '1px solid #d8dee8',
                                   background: color.value,
                                   cursor: 'pointer',
                                 }}

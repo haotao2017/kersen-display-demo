@@ -92,7 +92,6 @@ export const ApListPage = () => {
                 heartbeat: values.heartbeat,
                 channel: values.channel,
                 power: values.power,
-                server: values.server,
               },
             })
           }
@@ -121,9 +120,6 @@ export const ApListPage = () => {
           </Form.Item>
           <Form.Item name="location" label={tx('安装位置', 'Location')}>
             <Input placeholder={tx('例如 一楼生鲜区', 'e.g. Fresh Area')} />
-          </Form.Item>
-          <Form.Item name="server" label={tx('目标服务器', 'Target Server')}>
-            <Input placeholder={tx('例如 mqtt.gdesl.com:1883', 'e.g. mqtt.gdesl.com:1883')} />
           </Form.Item>
           <Form.Item name="heartbeat" label={tx('心跳间隔（秒）', 'Heartbeat Interval (s)')}>
             <InputNumber min={15} style={{ width: '100%' }} />
@@ -228,6 +224,15 @@ export const ApDetailPage = () => {
   const latestHeartbeatPayload = detail?.recentHeartbeats?.[0]?.payloadJson ?? {};
   const latestConfig = (detail?.config ?? {}) as Record<string, string | number | boolean | null | undefined>;
   const summaryConfig = (summary?.config ?? {}) as Record<string, string | number | boolean | null | undefined>;
+  const configItems = [
+    { key: 'heartbeat', label: tx('配置心跳', 'Configured Heartbeat'), children: latestConfig.heartbeat ? `${latestConfig.heartbeat}s` : undefined },
+    { key: 'channel', label: tx('信道', 'Channel'), children: latestConfig.channel },
+    { key: 'power', label: tx('发射功率', 'Transmit Power'), children: latestConfig.power },
+    { key: 'modVersion', label: tx('模组版本', 'Module Version'), children: latestConfig.modVersion },
+    { key: 'configVersion', label: tx('配置版本', 'Config Version'), children: latestConfig.configVersion },
+    { key: 'localIP', label: tx('固定 IP', 'Fixed IP'), children: latestConfig.localIP },
+    { key: 'gateway', label: tx('网关', 'Gateway'), children: latestConfig.gateway },
+  ].filter((item) => item.children !== undefined && item.children !== null && item.children !== '');
 
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
@@ -248,7 +253,6 @@ export const ApDetailPage = () => {
                   mac: summary?.mac,
                   firmwareVersion: summary?.firmwareVersion,
                   location: summary?.location,
-                  server: latestConfig.server,
                   heartbeat: latestConfig.heartbeat,
                   channel: latestConfig.channel,
                   power: latestConfig.power,
@@ -318,21 +322,11 @@ export const ApDetailPage = () => {
           ]}
         />
       </Card>
-      <Card title={tx('当前配置', 'Current Config')} loading={isPagePending}>
-        <Descriptions
-          column={2}
-          items={[
-            { key: 'server', label: tx('目标服务器', 'Target Server'), children: latestConfig.server ?? '-' },
-            { key: 'heartbeat', label: tx('配置心跳', 'Configured Heartbeat'), children: latestConfig.heartbeat ? `${latestConfig.heartbeat}s` : '-' },
-            { key: 'channel', label: tx('信道', 'Channel'), children: latestConfig.channel ?? '-' },
-            { key: 'power', label: tx('发射功率', 'Transmit Power'), children: latestConfig.power ?? '-' },
-            { key: 'modVersion', label: tx('模组版本', 'Module Version'), children: latestConfig.modVersion ?? '-' },
-            { key: 'configVersion', label: tx('配置版本', 'Config Version'), children: latestConfig.configVersion ?? '-' },
-            { key: 'localIP', label: tx('固定 IP', 'Fixed IP'), children: latestConfig.localIP ?? '-' },
-            { key: 'gateway', label: tx('网关', 'Gateway'), children: latestConfig.gateway ?? '-' },
-          ]}
-        />
-      </Card>
+      {configItems.length ? (
+        <Card title={tx('当前配置', 'Current Config')} loading={isPagePending}>
+          <Descriptions column={2} items={configItems} />
+        </Card>
+      ) : null}
       <Card title={tx('最近心跳', 'Recent Heartbeats')}>
         <Table
           rowKey="id"
@@ -389,7 +383,7 @@ export const ApDetailPage = () => {
             {
               title: tx('内容', 'Payload'),
               render: (_, row: any) => (
-                <Typography.Text style={{ fontSize: 12 }} ellipsis={{ tooltip: JSON.stringify(row.body ?? row.query ?? {}) }}>
+                <Typography.Text style={{ display: 'block', maxWidth: 720, fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: 1.5 }}>
                   {JSON.stringify(row.body ?? row.query ?? {})}
                 </Typography.Text>
               ),
@@ -466,7 +460,6 @@ export const ApDetailPage = () => {
                 heartbeat: values.heartbeat,
                 channel: values.channel,
                 power: values.power,
-                server: values.server,
               },
             })
           }
@@ -495,9 +488,6 @@ export const ApDetailPage = () => {
           </Form.Item>
           <Form.Item name="location" label={tx('安装位置', 'Location')}>
             <Input placeholder={tx('例如 一楼生鲜区', 'e.g. Fresh Area')} />
-          </Form.Item>
-          <Form.Item name="server" label={tx('目标服务器', 'Target Server')}>
-            <Input placeholder={tx('例如 mqtt.gdesl.com:1883', 'e.g. mqtt.gdesl.com:1883')} />
           </Form.Item>
           <Form.Item name="heartbeat" label={tx('心跳间隔（秒）', 'Heartbeat Interval (s)')}>
             <InputNumber min={15} style={{ width: '100%' }} />

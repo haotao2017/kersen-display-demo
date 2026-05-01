@@ -1726,18 +1726,20 @@ export class ApWebsocketService {
       return;
     }
 
+    const context = this.socketContexts.get(ws);
+
     if (parsed.type === 'AP_CH_LIST') {
-      this.applyApChannels(parsed as ApChannelListMessage);
+      this.applyApChannels(parsed as ApChannelListMessage, context);
       return;
     }
 
     if (parsed.type === 'DEVICE_RETRIEVE') {
-      this.applyDeviceRetrieve(parsed as DeviceRetrieveMessage);
+      this.applyDeviceRetrieve(parsed as DeviceRetrieveMessage, context);
       return;
     }
 
     if (parsed.type === 'SLAVE_ADV_SVC') {
-      this.applySlaveAdv(parsed as SlaveAdvSvcMessage);
+      this.applySlaveAdv(parsed as SlaveAdvSvcMessage, context);
     }
   }
 
@@ -1831,8 +1833,9 @@ export class ApWebsocketService {
     this.db.save();
   }
 
-  private applyApChannels(message: ApChannelListMessage) {
-    const ap = [...this.db.baseStations.values()].find((item) => item.status === 'online');
+  private applyApChannels(message: ApChannelListMessage, context?: ApSocketContext) {
+    const ap = (context?.apId ? this.db.baseStations.get(context.apId) : undefined)
+      ?? [...this.db.baseStations.values()].find((item) => item.status === 'online');
     if (!ap) {
       return;
     }
@@ -1847,11 +1850,25 @@ export class ApWebsocketService {
     this.db.save();
   }
 
-  private applyDeviceRetrieve(message: DeviceRetrieveMessage) {
+  private applyDeviceRetrieve(message: DeviceRetrieveMessage, context?: ApSocketContext) {
     const entries = Object.entries(message.data ?? {});
-    const ap = [...this.db.baseStations.values()].find((item) => item.status === 'online');
+    const ap = (context?.apId ? this.db.baseStations.get(context.apId) : undefined)
+      ?? [...this.db.baseStations.values()].find((item) => item.status === 'online');
     const apId = ap?.id;
     const storeCode = ap?.storeCode ?? process.env.UPSTREAM_STORE_CODE ?? '20248517';
+    const seenLabelIds = new Set(entries.map(([labelId]) => labelId));
+
+    if (apId) {
+      for (const label of this.db.labels.values()) {
+        if (label.apId === apId && !seenLabelIds.has(label.id)) {
+          this.db.labels.set(label.id, {
+            ...label,
+            status: 'offline',
+            updatedAt: new Date().toISOString(),
+          });
+        }
+      }
+    }
 
     for (const [labelId, payload] of entries) {
       const current = this.db.labels.get(labelId);
@@ -1860,7 +1877,7 @@ export class ApWebsocketService {
         ...currentRow,
         id: labelId,
         storeCode,
-        apId,
+        apId: apId ?? current?.apId,
         sku: current?.sku ?? labelId,
         title: current?.title ?? `ESL ${labelId}`,
         price: current?.price ?? 0,
@@ -1889,13 +1906,14 @@ export class ApWebsocketService {
     this.db.save();
   }
 
-  private applySlaveAdv(message: SlaveAdvSvcMessage) {
+  private applySlaveAdv(message: SlaveAdvSvcMessage, context?: ApSocketContext) {
     const labelId = message.addr?.slice(0, 8);
     if (!labelId) {
       return;
     }
 
-    const ap = [...this.db.baseStations.values()].find((item) => item.status === 'online');
+    const ap = (context?.apId ? this.db.baseStations.get(context.apId) : undefined)
+      ?? [...this.db.baseStations.values()].find((item) => item.status === 'online');
     const current = this.db.labels.get(labelId);
     const currentRow = (current ?? {}) as Label & Record<string, unknown>;
     const services = Object.fromEntries((message.service_list ?? []).map((item) => [item.service ?? 'unknown', item.b64dat ?? '']));
@@ -1903,7 +1921,7 @@ export class ApWebsocketService {
       ...currentRow,
       id: labelId,
       storeCode: current?.storeCode ?? ap?.storeCode ?? process.env.UPSTREAM_STORE_CODE ?? '20248517',
-      apId: current?.apId ?? ap?.id,
+      apId: ap?.id ?? current?.apId,
       sku: current?.sku ?? labelId,
       title: current?.title ?? `ESL ${labelId}`,
       price: current?.price ?? 0,
