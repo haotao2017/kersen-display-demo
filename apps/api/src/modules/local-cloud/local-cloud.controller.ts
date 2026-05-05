@@ -75,6 +75,7 @@ const now = () => new Date().toISOString();
 const id = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 const uploadDir = join(process.cwd(), 'uploads');
 const SVG_FONT_STACK = 'Arial, Microsoft YaHei, sans-serif';
+const OFFLINE_AFTER_MS = Number(process.env.AP_OFFLINE_AFTER_SECONDS ?? 90) * 1000;
 
 const SCREEN_PRESETS: ScreenPreset[] = [
   { width: 800, height: 480, service: '01-00-00-0c', magic: 0x0c, bpp: 2, supersize: true, mtu: 10000, rotate: 0, mirrorX: false, mode: '0C 800x480' },
@@ -106,6 +107,14 @@ function stringValue(value: unknown, fallback = '') {
 function numberValue(value: unknown, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function isRecentActivity(value?: string) {
+  if (!value) {
+    return false;
+  }
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) && Date.now() - time <= OFFLINE_AFTER_MS;
 }
 
 function imageContentType(filename: string) {
@@ -607,7 +616,7 @@ export class LocalCloudController {
   @Post('aps/:apId/sync-status')
   syncAp(@Param('apId') apId: string) {
     const ap = this.findAp(apId);
-    return { ok: true, status: ap.status };
+    return { ok: true, status: this.localAp(ap)?.status ?? 'offline' };
   }
 
   @Post('aps/:apId/search-devices')
@@ -1340,6 +1349,8 @@ export class LocalCloudController {
     const product = row.productId ? this.db.cloudProducts.get(String(row.productId)) ?? null : null;
     const template = row.templateId ? this.db.cloudTemplates.get(String(row.templateId)) ?? null : null;
     const preset = this.resolveDevicePreset(stringValue(row.deviceType), template);
+    const activeRecently = isRecentActivity(label.updatedAt);
+    const status = activeRecently && label.status !== 'idle' ? label.status : 'offline';
     return {
       id: label.id,
       eslCode: label.id,
@@ -1353,7 +1364,7 @@ export class LocalCloudController {
       battery: label.battery ?? 100,
       signal: label.rssi ?? 0,
       bindStatus: row.productId || row.templateId ? 'bound' : 'unbound',
-      status: label.status === 'idle' ? 'offline' : label.status,
+      status,
       lastRefreshAt: label.updatedAt,
       createdAt: label.updatedAt,
       updatedAt: label.updatedAt,
@@ -1401,6 +1412,7 @@ export class LocalCloudController {
       .filter((label) => label.apId === ap.id)
       .map((label) => this.localDevice(label, false));
     const latestHeartbeat = ap.lastSeenAt ?? now();
+    const online = ap.status === 'online' && isRecentActivity(ap.lastSeenAt);
     return {
       id: ap.id,
       apCode: ap.id,
@@ -1410,8 +1422,8 @@ export class LocalCloudController {
       firmwareVersion: ap.firmware,
       location: row.location,
       config: row.config ?? {},
-      status: ap.status === 'online' ? 'online' : 'offline',
-      online: ap.status === 'online',
+      status: online ? 'online' : 'offline',
+      online,
       lastOnlineAt: ap.lastSeenAt,
       lastHeartbeatAt: latestHeartbeat,
       heartbeatIntervalSeconds: Number(process.env.AP_OFFLINE_AFTER_SECONDS ?? 90),
@@ -1430,7 +1442,7 @@ export class LocalCloudController {
       recentHeartbeats: [{
         id: `${ap.id}-latest`,
         createdAt: latestHeartbeat,
-        status: ap.status,
+        status: online ? 'online' : 'offline',
         payloadJson: { ip: ap.ip, firmware: ap.firmware, hostAddr: ap.hostAddr },
       }],
       recentTasks: [...this.db.cloudTasks.values()].filter((item) => item.apId === ap.id).slice(0, 10),

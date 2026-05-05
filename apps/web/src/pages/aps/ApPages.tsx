@@ -15,7 +15,7 @@ export const ApListPage = () => {
   const queryClient = useQueryClient();
   const [form] = Form.useForm();
   const [open, setOpen] = useState(false);
-  const { data, isPending } = useQuery({ queryKey: queryKeys.aps, queryFn: () => api.aps({}) });
+  const { data, isPending } = useQuery({ queryKey: queryKeys.aps, queryFn: () => api.aps({}), refetchInterval: 10_000 });
   const create = useMutation({
     mutationFn: api.createAp,
     onSuccess: () => {
@@ -157,11 +157,13 @@ export const ApDetailPage = () => {
     queryKey: queryKeys.apSummary(id),
     queryFn: () => api.ap(id),
     enabled: Boolean(id),
+    refetchInterval: 10_000,
   });
   const { data: snapshotData, refetch, isFetching, isPending: isSnapshotPending } = useQuery({
     queryKey: queryKeys.apSnapshot(id),
     queryFn: () => api.ap(id),
     enabled: Boolean(id),
+    refetchInterval: 10_000,
   });
   const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
   const sync = useMutation({

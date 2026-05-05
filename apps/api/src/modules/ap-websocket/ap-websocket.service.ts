@@ -424,6 +424,7 @@ export class ApWebsocketService {
         const latestContext = this.socketContexts.get(ws);
         if (latestContext) {
           latestContext.lastMessageAt = new Date().toISOString();
+          this.touchApActivity(latestContext);
         }
         this.observeApReply(text, latestContext);
         void this.bridgeUplinkToMqtt(text, ws);
@@ -1801,6 +1802,22 @@ export class ApWebsocketService {
   private pickApId(parsed: Record<string, unknown>, context?: ApSocketContext) {
     const raw = parsed.ap_code ?? parsed.mac ?? context?.apId ?? [...this.db.baseStations.values()].find((item) => item.status === 'online')?.id;
     return normalizeMac(String(raw ?? 'unknown-ap')) ?? 'unknown-ap';
+  }
+
+  private touchApActivity(context?: ApSocketContext) {
+    if (!context?.apId) {
+      return;
+    }
+    const current = this.db.baseStations.get(context.apId);
+    if (!current) {
+      return;
+    }
+    this.db.baseStations.set(current.id, {
+      ...current,
+      status: 'online',
+      lastSeenAt: new Date().toISOString(),
+    });
+    this.db.save();
   }
 
   private applyApOnline(message: ApOnlineMessage, ws: WebSocket, remoteAddress?: string) {

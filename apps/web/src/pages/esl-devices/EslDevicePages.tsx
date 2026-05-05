@@ -16,10 +16,10 @@ export const EslDeviceListPage = () => {
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
   const [bindForm] = Form.useForm();
-  const { data, isPending } = useQuery({ queryKey: queryKeys.devices, queryFn: () => api.devices({}) });
+  const { data, isPending } = useQuery({ queryKey: queryKeys.devices, queryFn: () => api.devices({}), refetchInterval: 10_000 });
   const { data: products } = useQuery({ queryKey: queryKeys.products, queryFn: () => api.products({}) });
   const { data: templates } = useQuery({ queryKey: queryKeys.templates, queryFn: () => api.templates({}) });
-  const { data: aps } = useQuery({ queryKey: queryKeys.aps, queryFn: () => api.aps({}) });
+  const { data: aps } = useQuery({ queryKey: queryKeys.aps, queryFn: () => api.aps({}), refetchInterval: 10_000 });
   const create = useMutation({
     mutationFn: api.createDevice,
     onSuccess: () => {
@@ -173,7 +173,7 @@ export const EslDeviceListPage = () => {
 export const EslDeviceDetailPage = () => {
   const { tx } = useI18n();
   const { id = '' } = useParams();
-  const { data, isPending } = useQuery({ queryKey: queryKeys.device(id), queryFn: () => api.device(id) });
+  const { data, isPending } = useQuery({ queryKey: queryKeys.device(id), queryFn: () => api.device(id), refetchInterval: 10_000 });
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
       <Card title={`${tx('设备详情', 'Device Details')} · ${data?.eslCode ?? ''}`} loading={isPending}>
