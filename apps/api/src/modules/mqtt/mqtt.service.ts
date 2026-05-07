@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import Aedes, { AedesPublishPacket, Client, createBroker } from 'aedes';
-import { connect as connectTcp, createServer, Server, Socket } from 'node:net';
+import { connect as connectTcp, createServer, isIP, Server, Socket } from 'node:net';
 import { createServer as createHttpServer, Server as HttpServer } from 'node:http';
 import { connect as connectTls } from 'node:tls';
 import { generate, parser } from 'mqtt-packet';
@@ -224,7 +224,8 @@ export class MqttService implements OnModuleDestroy {
     const rejectUnauthorized = this.externalValidateCertificate();
 
     this.externalConnecting = new Promise<void>((resolve, reject) => {
-      const socket = tls ? connectTls({ host, port, servername: host, rejectUnauthorized }) : connectTcp({ host, port });
+      const servername = process.env.EMQX_SERVERNAME || (isIP(host) ? undefined : host);
+      const socket = tls ? connectTls({ host, port, servername, rejectUnauthorized }) : connectTcp({ host, port });
       const mqttParser = parser();
       const timeout = setTimeout(() => {
         socket.destroy();

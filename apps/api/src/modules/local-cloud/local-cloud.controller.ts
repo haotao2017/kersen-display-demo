@@ -8,6 +8,8 @@ import { extname, join } from 'node:path';
 import { deflateRawSync } from 'node:zlib';
 import { Response } from 'express';
 import sharp = require('sharp');
+import bwipjs = require('bwip-js');
+import QRCode = require('qrcode');
 import { MemoryStore } from '../../shared/memory-store';
 import { BaseStation, Label } from '../../shared/models';
 import { ApWebsocketService } from '../ap-websocket/ap-websocket.service';
@@ -142,6 +144,63 @@ function escapeXml(value: unknown) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+function boolValue(value: unknown, fallback = false) {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function estimateSvgTextWidth(text: string, fontSize: number, fontWeight: string) {
+  const weightBoost = fontWeight === '700' ? 1.08 : 1;
+  let width = 0;
+  for (const char of text) {
+    if (/[\u4e00-\u9fff\uff00-\uffef]/.test(char)) {
+      width += fontSize;
+    } else if (/[A-Z0-9￥$]/i.test(char)) {
+      width += fontSize * 0.62;
+    } else if (/\s/.test(char)) {
+      width += fontSize * 0.34;
+    } else {
+      width += fontSize * 0.5;
+    }
+  }
+  return width * weightBoost;
+}
+
+function measureSvgTextBox(text: string, fontSize: number, fontWeight: string) {
+  const lines = text.split(/\r?\n/);
+  const width = Math.max(1, ...lines.map((line) => estimateSvgTextWidth(line || ' ', fontSize, fontWeight)));
+  return {
+    width: Math.ceil(width + 8),
+    height: Math.ceil(Math.max(1, lines.length) * fontSize * 1.18),
+  };
+}
+
+function wrapSvgText(text: string, maxWidth: number, fontSize: number, fontWeight: string) {
+  if (maxWidth <= 0) return [];
+  const output: string[] = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    let current = '';
+    for (const char of rawLine) {
+      const candidate = `${current}${char}`;
+      if (current && estimateSvgTextWidth(candidate, fontSize, fontWeight) > maxWidth) {
+        output.push(current);
+        current = char;
+      } else {
+        current = candidate;
+      }
+    }
+    output.push(current || ' ');
+  }
+  return output;
+}
+
+function svgToDataUri(svg: string) {
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+}
+
+function fitSvgImage(svg: string, x: number, y: number, width: number, height: number, preserveAspectRatio = 'xMidYMid meet') {
+  return `<image href="${escapeXml(svgToDataUri(svg))}" x="${x}" y="${y}" width="${width}" height="${height}" preserveAspectRatio="${preserveAspectRatio}"/>`;
 }
 
 function defaultSchema(template: Row) {
@@ -505,7 +564,9 @@ export class LocalCloudController {
     const label = this.findLabel(deviceId);
     return {
       ...this.localDevice(label),
-      recentTasks: [...this.db.cloudTasks.values()].filter((item) => item.eslDeviceId === deviceId),
+      recentTasks: [...this.db.cloudTasks.values()]
+        .filter((item) => item.eslDeviceId === deviceId)
+        .map((item) => this.localTask(item, false)),
     };
   }
 
@@ -539,7 +600,7 @@ export class LocalCloudController {
     this.db.labels.set(label.id, label);
     this.db.save();
     const task = body.autoRefresh === false ? null : await this.createRefreshTask(label.id, 'bind_refresh');
-    return { ...this.localDevice(label), recentTasks: task ? [task] : [] };
+    return { ...this.localDevice(label), recentTasks: task ? [this.localTask(task, false)] : [] };
   }
 
   @Post('esl-devices/:deviceId/unbind')
@@ -566,7 +627,9 @@ export class LocalCloudController {
 
   @Get('esl-devices/:deviceId/tasks')
   deviceTasks(@Param('deviceId') deviceId: string) {
-    return [...this.db.cloudTasks.values()].filter((item) => item.eslDeviceId === deviceId);
+    return [...this.db.cloudTasks.values()]
+      .filter((item) => item.eslDeviceId === deviceId)
+      .map((item) => this.localTask(item, false));
   }
 
   @Get('aps')
@@ -672,14 +735,14 @@ export class LocalCloudController {
 
   @Get('tasks')
   tasks(@Query() query: Row) {
-    return paginate([...this.db.cloudTasks.values()].reverse(), query);
+    return paginate([...this.db.cloudTasks.values()].reverse().map((item) => this.localTask(item, false)), query);
   }
 
   @Get('tasks/:taskId')
   task(@Param('taskId') taskId: string) {
     const task = this.db.cloudTasks.get(taskId);
     if (!task) throw new NotFoundException('Task not found');
-    return task;
+    return this.localTask(task, true);
   }
 
   @Post('tasks/:taskId/retry')
@@ -856,7 +919,7 @@ export class LocalCloudController {
       triggeredAt: now(),
       createdAt: now(),
       updatedAt: now(),
-      eslDevice: this.localDevice(label),
+      eslDevice: this.localDevice(label, false),
     } as Row;
     this.db.cloudTasks.set(String(task.id), task);
     const delivery = await this.deliverRefreshTask(label, render, task.id);
@@ -1070,7 +1133,7 @@ export class LocalCloudController {
     const body = (await Promise.all(elements
       .filter((item) => item.visible !== false)
       .sort((left, right) => numberValue(left.zIndex, 0) - numberValue(right.zIndex, 0))
-      .map((item) => this.renderPreviewElement(item, bindings))))
+      .map((item, index) => this.renderPreviewElement(item, bindings, index))))
       .join('');
     return [
       `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
@@ -1230,7 +1293,7 @@ export class LocalCloudController {
     }, width, height);
   }
 
-  private async renderPreviewElement(item: Row, bindings: Record<string, string> = {}) {
+  private async renderPreviewElement(item: Row, bindings: Record<string, string> = {}, index = 0) {
     const type = String(item.type ?? 'text');
     const x = numberValue(item.x, 0);
     const y = numberValue(item.y, 0);
@@ -1252,18 +1315,18 @@ export class LocalCloudController {
       return `<line x1="${x}" y1="${y}" x2="${x + width}" y2="${y + height}" stroke="${escapeXml(style.stroke ?? '#111111')}" stroke-width="${numberValue(style.strokeWidth, 1)}"/>`;
     }
     if (type === 'barcode') {
-      const fill = escapeXml(style.fill ?? '#111111');
       const stroke = escapeXml(style.stroke ?? '#111111');
       const background = escapeXml(style.background ?? '#ffffff');
-      const text = escapeXml(boundText || stringValue(item.expression, stringValue(item.bindingField, 'barcode')));
-      return `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${background}" stroke="${stroke}" stroke-width="1"/><rect x="${x + 4}" y="${y + 4}" width="${Math.max(1, width - 8)}" height="${Math.max(1, height - 20)}" fill="${fill}"/><text x="${x + width / 2}" y="${y + height - 4}" text-anchor="middle" font-size="10" font-family="${SVG_FONT_STACK}" fill="${fill}">${text}</text>`;
+      const text = boundText || stringValue(item.expression, stringValue(item.bindingField, 'barcode'));
+      const barSvg = this.renderBarcodeSvg(text, width, height);
+      return `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${background}" stroke="${stroke}" stroke-width="1"/>${fitSvgImage(barSvg, x + 2, y + 2, Math.max(1, width - 4), Math.max(1, height - 4))}`;
     }
     if (type === 'qrcode') {
-      const fill = escapeXml(style.fill ?? '#111111');
       const stroke = escapeXml(style.stroke ?? '#111111');
       const background = escapeXml(style.background ?? '#ffffff');
-      const text = escapeXml(boundText || stringValue(item.expression, stringValue(item.bindingField, 'QR')));
-      return `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${background}" stroke="${stroke}" stroke-width="1"/><text x="${x + width / 2}" y="${y + height / 2 + 6}" text-anchor="middle" font-size="${Math.min(18, Math.max(10, Math.floor(height / 4)))}" font-weight="700" font-family="${SVG_FONT_STACK}" fill="${fill}">${text}</text>`;
+      const text = boundText || stringValue(item.expression, stringValue(item.bindingField, 'QR'));
+      const qrSvg = await this.renderQrCodeSvg(text);
+      return `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${background}" stroke="${stroke}" stroke-width="1"/>${fitSvgImage(qrSvg, x + 2, y + 2, Math.max(1, width - 4), Math.max(1, height - 4))}`;
     }
     const fontSize = numberValue(style.fontSize, type === 'price' ? 28 : 14);
     const fontWeight = String(style.fontWeight ?? '') === 'bold' ? '700' : '400';
@@ -1272,9 +1335,59 @@ export class LocalCloudController {
     const background = escapeXml(style.background ?? '#ffffff');
     const textAlign = String(style.textAlign ?? 'left');
     const textAnchor = textAlign === 'center' ? 'middle' : textAlign === 'right' ? 'end' : 'start';
-    const textX = textAlign === 'center' ? x + width / 2 : textAlign === 'right' ? x + width - 4 : x + 4;
+    const paddingX = 4;
     const text = type === 'price' ? `￥${boundText || '19.90'}` : (boundText || stringValue(item.expression, String(item.bindingField ?? type)));
-    return `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${background}" stroke="${stroke}" stroke-width="1"/><text x="${textX}" y="${y + fontSize}" text-anchor="${textAnchor}" font-size="${fontSize}" font-weight="${fontWeight}" font-family="${SVG_FONT_STACK}" fill="${fill}">${escapeXml(text)}</text>`;
+    const autoSize = boolValue(style.autoSize);
+    const measured = autoSize ? measureSvgTextBox(text, fontSize, fontWeight) : null;
+    const boxWidth = measured?.width ?? width;
+    const boxHeight = measured?.height ?? height;
+    const textX = textAlign === 'center' ? x + boxWidth / 2 : textAlign === 'right' ? x + boxWidth - paddingX : x + paddingX;
+    const clipId = `text-clip-${index}-${escapeXml(String(item.id ?? 'element')).replace(/[^a-zA-Z0-9_-]/g, '')}`;
+    const lineHeight = fontSize * 1.18;
+    const maxTextWidth = Math.max(1, boxWidth - paddingX * 2);
+    const lines = autoSize || String(style.textOverflow ?? 'clip') !== 'wrap'
+      ? text.split(/\r?\n/)
+      : wrapSvgText(text, maxTextWidth, fontSize, fontWeight);
+    const maxLines = Math.max(1, Math.floor(boxHeight / lineHeight));
+    const visibleLines = lines.slice(0, maxLines);
+    const textNodes = visibleLines.map((line, lineIndex) => (
+      `<tspan x="${textX}" dy="${lineIndex === 0 ? 0 : lineHeight}">${escapeXml(line)}</tspan>`
+    )).join('');
+    return `<defs><clipPath id="${clipId}"><rect x="${x}" y="${y}" width="${boxWidth}" height="${boxHeight}"/></clipPath></defs><rect x="${x}" y="${y}" width="${boxWidth}" height="${boxHeight}" fill="${background}" stroke="${stroke}" stroke-width="1"/><text clip-path="url(#${clipId})" x="${textX}" y="${y + fontSize}" text-anchor="${textAnchor}" font-size="${fontSize}" font-weight="${fontWeight}" font-family="${SVG_FONT_STACK}" fill="${fill}">${textNodes}</text>`;
+  }
+
+  private renderBarcodeSvg(text: string, width: number, height: number) {
+    const barcodeText = stringValue(text, 'barcode');
+    try {
+      return bwipjs.toSVG({
+        bcid: 'code128',
+        text: barcodeText,
+        scale: 2,
+        height: Math.max(6, Math.floor(height * 0.18)),
+        includetext: height >= 34,
+        textsize: Math.max(7, Math.min(12, Math.floor(height * 0.18))),
+        textxalign: 'center',
+        backgroundcolor: 'FFFFFF',
+        barcolor: '000000',
+        textcolor: '000000',
+        paddingwidth: 0,
+        paddingheight: 0,
+      });
+    } catch {
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${Math.max(1, width)} ${Math.max(1, height)}"><rect width="100%" height="100%" fill="#fff"/><text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" font-size="10" fill="#000">${escapeXml(barcodeText)}</text></svg>`;
+    }
+  }
+
+  private async renderQrCodeSvg(text: string) {
+    return QRCode.toString(stringValue(text, 'QR'), {
+      type: 'svg',
+      margin: 0,
+      errorCorrectionLevel: 'M',
+      color: {
+        dark: '#000000',
+        light: '#ffffff',
+      },
+    });
   }
 
   private async resolveImageDataUri(value: string) {
@@ -1342,6 +1455,76 @@ export class LocalCloudController {
 
   private localDevices(): LocalDevice[] {
     return [...this.db.labels.values()].map((label) => this.localDevice(label));
+  }
+
+  private localTask(task: Row, includeDetail = false) {
+    const delivery = task.delivery && typeof task.delivery === 'object' ? task.delivery as Row : {};
+    const protocol = delivery.protocol && typeof delivery.protocol === 'object' ? delivery.protocol as Row : undefined;
+    const websocket = delivery.websocket && typeof delivery.websocket === 'object' ? delivery.websocket as Row : undefined;
+    const downlinkTrace = delivery.downlinkTrace && typeof delivery.downlinkTrace === 'object' ? delivery.downlinkTrace as Row : undefined;
+    const renderResult = task.renderResult && typeof task.renderResult === 'object' ? task.renderResult as Row : {};
+    const base = {
+      id: task.id,
+      taskType: task.taskType,
+      eslDeviceId: task.eslDeviceId,
+      apId: task.apId,
+      productId: task.productId,
+      templateId: task.templateId,
+      payload: task.payload,
+      renderResult: {
+        width: renderResult.width,
+        height: renderResult.height,
+        colorMode: renderResult.colorMode,
+        previewImageUrl: renderResult.previewImageUrl,
+      },
+      retryCount: task.retryCount,
+      status: task.status,
+      parentTaskId: task.parentTaskId,
+      triggeredAt: task.triggeredAt,
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+      resultMsg: task.resultMsg,
+      delivery: {
+        ok: delivery.ok,
+        reason: delivery.reason,
+        commandId: delivery.commandId,
+        transport: delivery.transport,
+        websocket: websocket ? {
+          ok: websocket.ok,
+          trackingId: websocket.trackingId,
+          reason: websocket.reason,
+        } : undefined,
+        mqtt: delivery.mqtt,
+        protocol,
+        downlinkTrace: downlinkTrace ? {
+          id: downlinkTrace.id,
+          status: downlinkTrace.status,
+          updatedAt: downlinkTrace.updatedAt,
+          commandType: downlinkTrace.commandType,
+          labelId: downlinkTrace.labelId,
+          queueId: downlinkTrace.queueId,
+          error: downlinkTrace.error,
+        } : undefined,
+      },
+    };
+    if (!includeDetail) {
+      return base;
+    }
+    return {
+      ...base,
+      events: Array.isArray(task.events) ? task.events : [],
+      eslDevice: task.eslDevice && typeof task.eslDevice === 'object'
+        ? {
+          id: (task.eslDevice as Row).id,
+          eslCode: (task.eslDevice as Row).eslCode,
+          name: (task.eslDevice as Row).name,
+          apId: (task.eslDevice as Row).apId,
+          productId: (task.eslDevice as Row).productId,
+          templateId: (task.eslDevice as Row).templateId,
+          status: (task.eslDevice as Row).status,
+        }
+        : undefined,
+    };
   }
 
   private localDevice(label: Label, includeAp = true): LocalDevice {
@@ -1445,7 +1628,10 @@ export class LocalCloudController {
         status: online ? 'online' : 'offline',
         payloadJson: { ip: ap.ip, firmware: ap.firmware, hostAddr: ap.hostAddr },
       }],
-      recentTasks: [...this.db.cloudTasks.values()].filter((item) => item.apId === ap.id).slice(0, 10),
+      recentTasks: [...this.db.cloudTasks.values()]
+        .filter((item) => item.apId === ap.id)
+        .slice(0, 10)
+        .map((item) => this.localTask(item, false)),
       recentLogs: this.db.requestLogs
         .filter((log) => JSON.stringify(log).includes(ap.id))
         .slice(0, 80),

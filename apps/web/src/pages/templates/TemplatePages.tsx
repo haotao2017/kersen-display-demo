@@ -1,5 +1,5 @@
 import { AppstoreOutlined, BgColorsOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, RedoOutlined, ToTopOutlined, UndoOutlined, VerticalAlignBottomOutlined, VerticalAlignTopOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
-import { App, Button, Card, Col, Descriptions, Divider, Form, Image, Input, InputNumber, List, Modal, Row, Select, Space, Table, Tag, Tooltip, Typography, Upload, message as globalMessage } from 'antd';
+import { App, Button, Card, Checkbox, Col, Descriptions, Divider, Form, Image, Input, InputNumber, List, Modal, Row, Select, Space, Table, Tag, Tooltip, Typography, Upload, message as globalMessage } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Stage, Layer, Rect, Text, Image as KonvaImage, Transformer, Line, Group } from 'react-konva';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -366,14 +366,14 @@ const createDesignerElement = (
       height: 40,
       bindingField: '#field2',
       expression: '99.00',
-      style: { ...defaults.style, fontSize: 26, fontWeight: 'bold' },
+      style: { ...defaults.style, fontSize: 26, fontWeight: 'bold', autoSize: false, textOverflow: 'clip' },
     };
   }
   if (type === 'text') {
-    return { ...defaults, width: 160, bindingField: '#name', expression: 'Text' };
+    return { ...defaults, width: 160, bindingField: '#name', expression: 'Text', style: { ...defaults.style, autoSize: false, textOverflow: 'clip' } };
   }
   if (type === 'label') {
-    return { ...defaults, width: 120, expression: 'Label' };
+    return { ...defaults, width: 120, expression: 'Label', style: { ...defaults.style, autoSize: false, textOverflow: 'clip' } };
   }
   if (type === 'image') {
     return {
@@ -426,8 +426,98 @@ const createDesignerElement = (
 };
 
 const DESIGNER_GRID_SIZE = 4;
+const TEXT_PADDING_X = 4;
+const TEXT_LINE_HEIGHT = 1.18;
 
 const snapValue = (value: number, size = DESIGNER_GRID_SIZE) => Math.round(value / size) * size;
+
+const TEXT_ELEMENT_TYPES: TemplateElement['type'][] = ['text', 'price', 'label'];
+
+const isTextElement = (element: TemplateElement) => TEXT_ELEMENT_TYPES.includes(element.type);
+
+const getElementPreviewText = (element: TemplateElement) => {
+  const rawText = String(element.expression ?? element.bindingField ?? element.type);
+  return element.type === 'price' && !rawText.trim().startsWith('￥') ? `￥${rawText}` : rawText;
+};
+
+const measureDesignerText = (element: TemplateElement, text = getElementPreviewText(element)) => {
+  const fontSize = Math.max(1, Number(element.style.fontSize ?? (element.type === 'price' ? 26 : 14)));
+  const fontWeight = String(element.style.fontWeight) === 'bold' ? '700' : '400';
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d');
+  if (!context) {
+    return {
+      width: Math.max(1, Math.ceil(text.length * fontSize * 0.62 + TEXT_PADDING_X * 2)),
+      height: Math.max(1, Math.ceil(fontSize * TEXT_LINE_HEIGHT)),
+    };
+  }
+  context.font = `${fontWeight} ${fontSize}px Arial, "Microsoft YaHei", sans-serif`;
+  const lines = text.split(/\r?\n/);
+  const measuredWidth = Math.max(1, ...lines.map((line) => context.measureText(line || ' ').width));
+  return {
+    width: Math.ceil(measuredWidth + TEXT_PADDING_X * 2),
+    height: Math.ceil(lines.length * fontSize * TEXT_LINE_HEIGHT),
+  };
+};
+
+const applyTextAutoSize = (element: TemplateElement): Partial<TemplateElement> => {
+  const size = measureDesignerText(element);
+  return {
+    width: Math.max(1, snapValue(size.width)),
+    height: Math.max(1, snapValue(size.height)),
+  };
+};
+
+const hashDesignerText = (value: string) => {
+  let hash = 2166136261;
+  for (const char of value) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+};
+
+const getDesignerBarcodeBars = (text: string) => {
+  const source = text.trim() || 'barcode';
+  const bars = [
+    { width: 2, gap: 1 },
+    { width: 1, gap: 1 },
+    { width: 1, gap: 2 },
+  ];
+  for (const [index, char] of [...source].entries()) {
+    const code = char.charCodeAt(0) + index * 17;
+    bars.push({ width: code % 4 === 0 ? 3 : code % 3 === 0 ? 2 : 1, gap: code % 5 === 0 ? 2 : 1 });
+    bars.push({ width: code % 7 === 0 ? 2 : 1, gap: 1 });
+  }
+  bars.push({ width: 2, gap: 1 }, { width: 1, gap: 1 }, { width: 2, gap: 0 });
+  return bars;
+};
+
+const getDesignerQrMatrix = (text: string, size = 21) => {
+  const sourceHash = hashDesignerText(text.trim() || 'QR');
+  const matrix = Array.from({ length: size }, () => Array.from({ length: size }, () => false));
+  const addFinder = (startX: number, startY: number) => {
+    for (let y = 0; y < 7; y += 1) {
+      for (let x = 0; x < 7; x += 1) {
+        const outer = x === 0 || y === 0 || x === 6 || y === 6;
+        const inner = x >= 2 && x <= 4 && y >= 2 && y <= 4;
+        matrix[startY + y][startX + x] = outer || inner;
+      }
+    }
+  };
+  addFinder(0, 0);
+  addFinder(size - 7, 0);
+  addFinder(0, size - 7);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const inFinder = (x < 8 && y < 8) || (x >= size - 8 && y < 8) || (x < 8 && y >= size - 8);
+      if (!inFinder) {
+        matrix[y][x] = ((Math.imul(x + 3, 1103515245) ^ Math.imul(y + 5, 12345) ^ sourceHash) & 3) === 0;
+      }
+    }
+  }
+  return matrix;
+};
 
 const resolveDesignerAssetUrl = (value?: string | null) => {
   const trimmed = String(value ?? '').trim();
@@ -545,6 +635,9 @@ const DesignerElementNode = ({
   const activeStroke = isSelected ? '#1677ff' : isHovering ? '#7cb3ff' : stroke;
   const activeShadow = isSelected || isHovering ? 'rgba(22,119,255,0.18)' : undefined;
   const imageCrop = image && element.type === 'image' ? getImageCoverCrop(image, element.width, element.height) : undefined;
+  const autoSizeText = isTextElement(element) && element.style.autoSize === true;
+  const textOverflow = String(element.style.textOverflow ?? 'clip');
+  const previewText = getElementPreviewText(element);
 
   if (element.type === 'rect') {
     return (
@@ -632,64 +725,100 @@ const DesignerElementNode = ({
   }
 
   if (element.type === 'qrcode') {
+    const text = String(element.expression ?? element.bindingField ?? 'QR');
+    const matrix = getDesignerQrMatrix(text);
+    const qrPadding = 4;
+    const qrSize = Math.max(1, Math.min(element.width, element.height) - qrPadding * 2);
+    const cellSize = qrSize / matrix.length;
+    const qrX = (element.width - qrSize) / 2;
+    const qrY = (element.height - qrSize) / 2;
     return (
       <>
-        <Rect
-          key={`${element.id}-qr-bg`}
+        <Group
+          key={element.id}
           {...commonDragProps}
           ref={setNode}
-          width={element.width}
-          height={element.height}
-          fill={background}
-          stroke={activeStroke}
-          strokeWidth={2}
-          dash={[4, 4]}
-          shadowColor={activeShadow}
-          shadowBlur={isSelected ? 8 : isHovering ? 4 : 0}
-        />
-        <Text
-          key={`${element.id}-qr-text`}
-          x={20 + element.x}
-          y={20 + element.y + element.height / 2 - 10}
-          width={element.width}
-          align="center"
-          text={String(element.expression ?? 'QR')}
-          fill={fill}
-          fontSize={18}
-          fontStyle="bold"
-          listening={false}
-        />
+        >
+          <Rect
+            width={element.width}
+            height={element.height}
+            fill={background}
+            stroke={activeStroke}
+            strokeWidth={2}
+            shadowColor={activeShadow}
+            shadowBlur={isSelected ? 8 : isHovering ? 4 : 0}
+          />
+          <Rect x={qrX} y={qrY} width={qrSize} height={qrSize} fill="#ffffff" listening={false} />
+          {matrix.flatMap((row, rowIndex) => row.map((filled, colIndex) => filled ? (
+            <Rect
+              key={`${rowIndex}-${colIndex}`}
+              x={qrX + colIndex * cellSize}
+              y={qrY + rowIndex * cellSize}
+              width={Math.ceil(cellSize)}
+              height={Math.ceil(cellSize)}
+              fill={fill}
+              listening={false}
+            />
+          ) : null))}
+        </Group>
       </>
     );
   }
 
   if (element.type === 'barcode') {
+    const text = String(element.expression ?? element.bindingField ?? '6901234567890');
+    const bars = getDesignerBarcodeBars(text);
+    const totalUnits = bars.reduce((sum, bar) => sum + bar.width + bar.gap, 0) || 1;
+    const barAreaHeight = Math.max(8, element.height - (element.height >= 34 ? 14 : 8));
+    let cursor = 4;
     return (
       <>
-        <Rect
-          key={`${element.id}-barcode-bg`}
+        <Group
+          key={element.id}
           {...commonDragProps}
           ref={setNode}
-          width={element.width}
-          height={element.height}
-          fill={background}
-          stroke={activeStroke}
-          strokeWidth={1}
-          shadowColor={activeShadow}
-          shadowBlur={isSelected ? 8 : isHovering ? 4 : 0}
-        />
-        <Text
-          key={`${element.id}-barcode-text`}
-          x={20 + element.x}
-          y={20 + element.y + 8}
-          width={element.width}
-          height={element.height}
-          text={String(element.expression ?? element.bindingField ?? '6901234567890')}
-          fontSize={12}
-          align="center"
-          fill={fill}
-          listening={false}
-        />
+        >
+          <Rect
+            width={element.width}
+            height={element.height}
+            fill={background}
+            stroke={activeStroke}
+            strokeWidth={1}
+            shadowColor={activeShadow}
+            shadowBlur={isSelected ? 8 : isHovering ? 4 : 0}
+          />
+          {bars.map((bar, index) => {
+            const availableWidth = Math.max(1, element.width - 8);
+            const unitWidth = availableWidth / totalUnits;
+            const x = cursor;
+            const width = Math.max(1, bar.width * unitWidth);
+            cursor += (bar.width + bar.gap) * unitWidth;
+            return (
+              <Rect
+                key={index}
+                x={x}
+                y={4}
+                width={width}
+                height={barAreaHeight}
+                fill={fill}
+                listening={false}
+              />
+            );
+          })}
+          {element.height >= 34 ? (
+            <Text
+              x={4}
+              y={Math.max(4, element.height - 13)}
+              width={Math.max(1, element.width - 8)}
+              height={10}
+              text={text}
+              fontSize={9}
+              align="center"
+              fill={fill}
+              listening={false}
+            />
+          ) : null}
+        </Group>
       </>
     );
   }
@@ -713,11 +842,15 @@ const DesignerElementNode = ({
         {...commonDragProps}
         width={element.width}
         height={element.height}
-        text={String(element.expression ?? element.bindingField ?? element.type)}
+        text={previewText}
         fontSize={Number(element.style.fontSize ?? 14)}
         fontStyle={String(element.style.fontWeight) === 'bold' ? 'bold' : 'normal'}
         align={String(element.style.textAlign ?? 'left') as 'left' | 'center' | 'right'}
         fill={fill}
+        wrap={autoSizeText ? 'none' : textOverflow === 'wrap' ? 'word' : 'none'}
+        ellipsis={!autoSizeText && textOverflow !== 'wrap'}
+        verticalAlign="top"
+        padding={TEXT_PADDING_X}
         shadowColor={activeShadow}
         shadowBlur={isSelected ? 8 : isHovering ? 4 : 0}
       />
@@ -1103,6 +1236,18 @@ export const TemplateDesignerPage = () => {
       ? 'shape'
       : 'text';
   const selectedCanBind = selectedElement ? BINDABLE_ELEMENT_TYPES.includes(selectedElement.type) : false;
+  const selectedIsTextElement = selectedElement ? isTextElement(selectedElement) : false;
+  const updateSelectedTextStyle = (patch: Record<string, unknown>) => {
+    if (!selectedElement) return;
+    const nextElement = {
+      ...selectedElement,
+      style: { ...selectedElement.style, ...patch },
+    };
+    updateElement(selectedElement.id, {
+      ...(nextElement.style.autoSize === true ? applyTextAutoSize(nextElement) : {}),
+      style: nextElement.style,
+    });
+  };
   const previewUploadProps: UploadProps = {
     accept: 'image/*',
     maxCount: 1,
@@ -1130,6 +1275,21 @@ export const TemplateDesignerPage = () => {
     setTextDraft(typeof element.expression === 'string' ? element.expression : '');
     setTextEditorOpen(true);
   };
+
+  useEffect(() => {
+    if (!schema) return;
+    const patches = schema.elements
+      .filter((element) => isTextElement(element) && element.style.autoSize === true)
+      .map((element) => {
+        const sizePatch = applyTextAutoSize(element);
+        if (sizePatch.width === element.width && sizePatch.height === element.height) return null;
+        return { id: element.id, patch: sizePatch };
+      })
+      .filter(Boolean) as Array<{ id: string; patch: Partial<TemplateElement> }>;
+    if (patches.length) {
+      updateElements(patches);
+    }
+  }, [schema?.elements, updateElements]);
 
   useEffect(() => {
     if (!data?.schema) return;
@@ -1959,25 +2119,48 @@ export const TemplateDesignerPage = () => {
                     <Row gutter={10}>
                       <Col span={12}>
                         <Form.Item label={tx('宽', 'Width')}>
-                          <InputNumber style={{ width: '100%' }} value={selectedElement.width} onChange={(value) => updateElement(selectedElement.id, { width: Math.max(1, Number(value ?? 1)) })} disabled={selectedIsProtected} />
+                          <InputNumber style={{ width: '100%' }} value={selectedElement.width} onChange={(value) => updateElement(selectedElement.id, { width: Math.max(1, Number(value ?? 1)) })} disabled={selectedIsProtected || (selectedIsTextElement && selectedStyle.autoSize === true)} />
                         </Form.Item>
                       </Col>
                       <Col span={12}>
                         <Form.Item label={tx('高', 'Height')}>
-                          <InputNumber style={{ width: '100%' }} value={selectedElement.height} onChange={(value) => updateElement(selectedElement.id, { height: Math.max(1, Number(value ?? 1)) })} disabled={selectedIsProtected} />
+                          <InputNumber style={{ width: '100%' }} value={selectedElement.height} onChange={(value) => updateElement(selectedElement.id, { height: Math.max(1, Number(value ?? 1)) })} disabled={selectedIsProtected || (selectedIsTextElement && selectedStyle.autoSize === true)} />
                         </Form.Item>
                       </Col>
                     </Row>
 
                     {selectedKind === 'text' ? (
                       <>
+                        {selectedIsTextElement ? (
+                          <>
+                            <Form.Item>
+                              <Checkbox
+                                checked={selectedStyle.autoSize === true}
+                                onChange={(event) => updateSelectedTextStyle({ autoSize: event.target.checked })}
+                              >
+                                {tx('宽高自适应内容', 'Auto size to content')}
+                              </Checkbox>
+                            </Form.Item>
+                            <Form.Item label={tx('固定宽高文字处理', 'Fixed Size Text Handling')}>
+                              <Select
+                                value={String(selectedStyle.textOverflow ?? 'clip')}
+                                disabled={selectedStyle.autoSize === true}
+                                options={[
+                                  { label: tx('按高度换行显示，超出高度裁剪', 'Wrap by width, clip extra lines'), value: 'wrap' },
+                                  { label: tx('不换行，超出范围裁剪', 'No wrap, clip overflow'), value: 'clip' },
+                                ]}
+                                onChange={(value) => updateSelectedTextStyle({ textOverflow: value })}
+                              />
+                            </Form.Item>
+                          </>
+                        ) : null}
                         <Form.Item label={tx('字体大小', 'Font Size')}>
                           <InputNumber
                             style={{ width: '100%' }}
                             min={8}
                             max={96}
                             value={Number(selectedStyle.fontSize ?? 14)}
-                            onChange={(value) => updateElement(selectedElement.id, { style: { ...selectedStyle, fontSize: Number(value ?? 14) } })}
+                            onChange={(value) => updateSelectedTextStyle({ fontSize: Number(value ?? 14) })}
                           />
                         </Form.Item>
                         <Form.Item label={tx('字重', 'Font Weight')}>
@@ -1987,7 +2170,7 @@ export const TemplateDesignerPage = () => {
                               { label: tx('常规', 'Regular'), value: 'normal' },
                               { label: tx('加粗', 'Bold'), value: 'bold' },
                             ]}
-                            onChange={(value) => updateElement(selectedElement.id, { style: { ...selectedStyle, fontWeight: value } })}
+                            onChange={(value) => updateSelectedTextStyle({ fontWeight: value })}
                           />
                         </Form.Item>
                         <Form.Item label={tx('对齐', 'Alignment')}>
@@ -1998,7 +2181,7 @@ export const TemplateDesignerPage = () => {
                               { label: tx('居中', 'Center'), value: 'center' },
                               { label: tx('右对齐', 'Right'), value: 'right' },
                             ]}
-                            onChange={(value) => updateElement(selectedElement.id, { style: { ...selectedStyle, textAlign: value } })}
+                            onChange={(value) => updateSelectedTextStyle({ textAlign: value })}
                           />
                         </Form.Item>
                         <Form.Item label={tx('文字颜色', 'Text Color')}>
@@ -2007,7 +2190,7 @@ export const TemplateDesignerPage = () => {
                               <button
                                 key={color.value}
                                 type="button"
-                                onClick={() => updateElement(selectedElement.id, { style: { ...selectedStyle, fill: color.value } })}
+                                onClick={() => updateSelectedTextStyle({ fill: color.value })}
                                 style={{
                                   width: 26,
                                   height: 26,
@@ -2026,7 +2209,7 @@ export const TemplateDesignerPage = () => {
                               <button
                                 key={color.value}
                                 type="button"
-                                onClick={() => updateElement(selectedElement.id, { style: { ...selectedStyle, background: color.value } })}
+                                onClick={() => updateSelectedTextStyle({ background: color.value })}
                                 style={{
                                   width: 26,
                                   height: 26,
@@ -2045,7 +2228,7 @@ export const TemplateDesignerPage = () => {
                               <button
                                 key={color.value}
                                 type="button"
-                                onClick={() => updateElement(selectedElement.id, { style: { ...selectedStyle, stroke: color.value } })}
+                                onClick={() => updateSelectedTextStyle({ stroke: color.value })}
                                 style={{
                                   width: 26,
                                   height: 26,
