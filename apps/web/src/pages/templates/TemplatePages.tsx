@@ -15,16 +15,36 @@ import { generateId } from '../../utils/id';
 
 const SAMPLE_IMAGE_URL = 'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=640&q=80';
 const ESL_SCREEN_PRESETS = [
-  { id: 'et0154-80', label: '1.54" ET0154-80 · 200×200', width: 200, height: 200, colorMode: 'bwry' as const },
-  { id: 'et0213-81', label: '2.13" ET0213-81 · 250×122', width: 250, height: 122, colorMode: 'bwry' as const },
-  { id: 'et0266-82', label: '2.66" ET0266-82 · 296×152', width: 296, height: 152, colorMode: 'bwry' as const },
-  { id: 'et0290-84', label: '2.90" ET0290-84 · 296×128', width: 296, height: 128, colorMode: 'bwry' as const },
-  { id: 'et0420-87', label: '4.20" ET0420-87 · 400×300', width: 400, height: 300, colorMode: 'bwry' as const },
-  { id: 'et0580-88', label: '5.80" ET0580-88 · 648×480', width: 648, height: 480, colorMode: 'bwry' as const },
-  { id: 'et0750-89', label: '7.50" ET0750-89 · 800×480', width: 800, height: 480, colorMode: 'bwry' as const },
-  { id: 'et1020-8b', label: '10.2" ET1020-8B · 960×640', width: 960, height: 640, colorMode: 'bwry' as const },
+  { id: 'esl-03-128x250', width: 250, height: 128, colorMode: 'bwry' as const },
+  { id: 'esl-03-02-128x296', width: 296, height: 128, colorMode: 'bwry' as const },
+  { id: 'esl-03-02-152x296', width: 296, height: 152, colorMode: 'bwry' as const },
+  { id: 'esl-03-02-200x200', width: 200, height: 200, colorMode: 'bwry' as const },
+  { id: 'esl-03-04-240x416', width: 416, height: 240, colorMode: 'bwry' as const },
+  { id: 'esl-03-03-184x384', width: 384, height: 184, colorMode: 'bwry' as const },
+  { id: 'esl-03-04-400x300', width: 400, height: 300, colorMode: 'bwry' as const },
+  { id: 'esl-03-0a-648x480', width: 648, height: 480, colorMode: 'bwry' as const },
+  { id: 'esl-0c-800x480', width: 800, height: 480, colorMode: 'bwry' as const },
 ];
-const DEFAULT_SCREEN_PRESET = ESL_SCREEN_PRESETS[6];
+const DEFAULT_SCREEN_PRESET = ESL_SCREEN_PRESETS.find((item) => item.id === 'esl-03-02-152x296') ?? ESL_SCREEN_PRESETS[0];
+const formatScreenSize = (preset: Pick<typeof ESL_SCREEN_PRESETS[number], 'width' | 'height'>) => `${preset.width}×${preset.height}`;
+const SCREEN_PRESET_OPTIONS = Array.from(
+  new Map(ESL_SCREEN_PRESETS.map((item) => [`${item.width}x${item.height}`, item])).values(),
+).map((item) => ({ label: formatScreenSize(item), value: item.id }));
+
+const findScreenPreset = (value?: { deviceType?: unknown; width?: unknown; height?: unknown } | null) => {
+  const deviceType = String(value?.deviceType ?? '').toLowerCase();
+  const byDeviceType = deviceType
+    ? ESL_SCREEN_PRESETS.find((item) => item.id === deviceType || item.id.toUpperCase() === String(value?.deviceType ?? '').toUpperCase())
+    : undefined;
+  if (byDeviceType) return byDeviceType;
+
+  const width = Number(value?.width);
+  const height = Number(value?.height);
+  return ESL_SCREEN_PRESETS.find((item) => (
+    (item.width === width && item.height === height)
+    || (item.width === height && item.height === width)
+  )) ?? DEFAULT_SCREEN_PRESET;
+};
 
 const DESIGNER_COLOR_SWATCHES = [
   { key: 'black', value: '#111111' },
@@ -917,7 +937,7 @@ export const TemplateFormPage = () => {
     onSuccess: (result: any) => navigate(`/templates/${result.id}/designer`),
   });
   const currentPresetId = useMemo(() => {
-    const current = ESL_SCREEN_PRESETS.find((item) => item.width === data?.width && item.height === data?.height);
+    const current = findScreenPreset(data);
     return current?.id ?? DEFAULT_SCREEN_PRESET.id;
   }, [data]);
 
@@ -958,7 +978,7 @@ export const TemplateFormPage = () => {
           rules={[{ required: true, message: tx('请选择屏幕规格', 'Please select a screen preset') }]}
         >
           <Select
-            options={ESL_SCREEN_PRESETS.map((item) => ({ label: item.label, value: item.id }))}
+            options={SCREEN_PRESET_OPTIONS}
             onChange={(value) => {
               const preset = ESL_SCREEN_PRESETS.find((item) => item.id === value);
               if (!preset) return;
@@ -1256,9 +1276,7 @@ export const TemplateDesignerPage = () => {
 
   useEffect(() => {
     if (!data?.schema) return;
-    const preset = templateDetail
-      ? ESL_SCREEN_PRESETS.find((item) => item.width === templateDetail.width && item.height === templateDetail.height) ?? DEFAULT_SCREEN_PRESET
-      : DEFAULT_SCREEN_PRESET;
+    const preset = templateDetail ? findScreenPreset(templateDetail) : DEFAULT_SCREEN_PRESET;
     const sizedSchema = applyScreenPresetToSchema(data.schema, preset) ?? data.schema;
     const sanitizedSchema = sanitizeDesignerSchema(sizedSchema);
     const nextElements = (sanitizedSchema.elements ?? []).map((item: any) => {
@@ -1271,7 +1289,7 @@ export const TemplateDesignerPage = () => {
 
   useEffect(() => {
     if (!templateDetail) return;
-    const preset = ESL_SCREEN_PRESETS.find((item) => item.width === templateDetail.width && item.height === templateDetail.height) ?? DEFAULT_SCREEN_PRESET;
+    const preset = findScreenPreset(templateDetail);
     templateForm.setFieldsValue({
       name: templateDetail.name,
       code: templateDetail.code,
@@ -1969,7 +1987,7 @@ export const TemplateDesignerPage = () => {
                     rules={[{ required: true, message: tx('请选择屏幕规格', 'Please select a screen preset') }]}
                   >
                     <Select
-                      options={ESL_SCREEN_PRESETS.map((item) => ({ label: item.label, value: item.id }))}
+                      options={SCREEN_PRESET_OPTIONS}
                       onChange={(value) => {
                         const preset = ESL_SCREEN_PRESETS.find((item) => item.id === value);
                         if (!preset) return;

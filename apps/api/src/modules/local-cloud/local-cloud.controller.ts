@@ -1810,7 +1810,7 @@ export class LocalCloudController {
     const row = label as Label & Row;
     const product = row.productId ? this.db.cloudProducts.get(String(row.productId)) ?? null : null;
     const template = row.templateId ? this.db.cloudTemplates.get(String(row.templateId)) ?? null : null;
-    const preset = this.resolveDevicePreset(stringValue(row.deviceType), template);
+    const preset = this.resolveDevicePreset(stringValue(row.deviceType), template, label.id);
     const activeRecently = isRecentActivity(label.updatedAt);
     const status = activeRecently && label.status !== 'idle' ? label.status : 'offline';
     return {
@@ -1840,7 +1840,7 @@ export class LocalCloudController {
     return [...this.db.baseStations.values()].map((ap) => this.localAp(ap));
   }
 
-  private resolveDevicePreset(deviceType?: string, template?: Row | null) {
+  private resolveDevicePreset(deviceType?: string, template?: Row | null, labelId?: string) {
     const normalized = stringValue(deviceType).toUpperCase();
     const byType: Record<string, { deviceType: string; width: number; height: number }> = {
       ET0154: { deviceType: 'ET0154-80', width: 200, height: 200 },
@@ -1849,15 +1849,37 @@ export class LocalCloudController {
       'ET0213-81': { deviceType: 'ET0213-81', width: 250, height: 122 },
       ET0266: { deviceType: 'ET0266-82', width: 296, height: 152 },
       'ET0266-82': { deviceType: 'ET0266-82', width: 296, height: 152 },
+      'ESL-03-02-152X296': { deviceType: 'ESL-03-02-152X296', width: 152, height: 296 },
+      'ESL-03-02-128X296': { deviceType: 'ESL-03-02-128X296', width: 128, height: 296 },
+      'ESL-03-04-240X416': { deviceType: 'ESL-03-04-240X416', width: 240, height: 416 },
+      'ESL-03-03-184X384': { deviceType: 'ESL-03-03-184X384', width: 184, height: 384 },
+      'ESL-03-128X250': { deviceType: 'ESL-03-128X250', width: 128, height: 250 },
+      'ESL-03-02-200X200': { deviceType: 'ESL-03-02-200X200', width: 200, height: 200 },
       ET0290: { deviceType: 'ET0290-84', width: 296, height: 128 },
       'ET0290-84': { deviceType: 'ET0290-84', width: 296, height: 128 },
       ET0420: { deviceType: 'ET0420-87', width: 400, height: 300 },
       'ET0420-87': { deviceType: 'ET0420-87', width: 400, height: 300 },
+      'ESL-03-04-400X300': { deviceType: 'ESL-03-04-400X300', width: 400, height: 300 },
       ET0580: { deviceType: 'ET0580-88', width: 648, height: 480 },
       'ET0580-88': { deviceType: 'ET0580-88', width: 648, height: 480 },
+      'ESL-03-0A-648X480': { deviceType: 'ESL-03-0A-648X480', width: 648, height: 480 },
       ET0750: { deviceType: 'ET0750-89', width: 800, height: 480 },
       'ET0750-89': { deviceType: 'ET0750-89', width: 800, height: 480 },
+      'ESL-0C-800X480': { deviceType: 'ESL-0C-800X480', width: 800, height: 480 },
     };
+    const normalizedLabelId = stringValue(labelId).toLowerCase();
+    const explicitKey = LABEL_PRESET_KEYS[normalizedLabelId]
+      ?? LABEL_PREFIX_PRESET_KEYS.find((item) => normalizedLabelId.startsWith(item.prefix))?.key;
+    const explicit = explicitKey ? SCREEN_PRESETS.find((preset) => preset.key === explicitKey) : undefined;
+    if (explicit) {
+      const width = Math.max(explicit.width, explicit.height);
+      const height = Math.min(explicit.width, explicit.height);
+      return {
+        deviceType: `ESL-${explicit.mode.split('#')[0].replace(/\s+/g, '-').toUpperCase()}`,
+        width,
+        height,
+      };
+    }
     return byType[normalized] ?? {
       deviceType: stringValue(template?.deviceType, 'KERSEN_296_128'),
       width: numberValue(template?.width, 296),
