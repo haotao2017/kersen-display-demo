@@ -1125,13 +1125,20 @@ export const TemplateDesignerPage = () => {
       await api.saveTemplateSchema(id, sanitizeDesignerSchema(applyScreenPresetToSchema(schema!, preset)));
       return api.publishTemplate(id, true);
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.templateSchema(id) });
       queryClient.invalidateQueries({ queryKey: queryKeys.template(id) });
       queryClient.invalidateQueries({ queryKey: queryKeys.templates });
       queryClient.invalidateQueries({ queryKey: queryKeys.tasks });
       queryClient.invalidateQueries({ queryKey: queryKeys.devices });
-      message.success(tx('模板已保存并发布', 'Template saved and published'));
+      if (result.refresh?.createdTaskCount) {
+        message.success(tx(
+          `模板已保存并发布，并创建 ${result.refresh.createdTaskCount} 个标签刷新任务`,
+          `Template saved and published; queued ${result.refresh.createdTaskCount} label refresh task(s)`,
+        ));
+      } else {
+        message.success(tx('模板已保存并发布', 'Template saved and published'));
+      }
     },
   });
   const deleteVersion = useMutation({

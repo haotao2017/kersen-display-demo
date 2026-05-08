@@ -415,31 +415,20 @@ export class LocalCloudController {
   }
 
   @Put('products/:productId')
-  updateProduct(@Param('productId') productId: string, @Body() body: Row) {
+  async updateProduct(@Param('productId') productId: string, @Body() body: Row) {
     const current = this.findProduct(productId);
     const product = this.upsertProduct({ ...current, ...body, id: productId });
+    const refresh = await this.refreshLinkedProductDevices(productId, 'product_update_refresh');
     return {
       ...product,
-      refresh: {
-        attempted: false,
-        boundDeviceCount: this.localDevices().filter((item) => item.productId === productId).length,
-        refreshableDeviceCount: 0,
-        skippedDeviceCount: 0,
-        createdTaskCount: 0,
-        taskIds: [],
-        reasonCode: null,
-        message: '商品已更新，未自动下发',
-      },
+      refresh,
     };
   }
 
   @Post('products/:productId/refresh-linked-devices')
   async refreshProduct(@Param('productId') productId: string) {
-    const tasks = await Promise.all(this.localDevices()
-      .filter((item) => item.productId === productId)
-      .map((device) => this.createRefreshTask(String(device.id), 'product_refresh')));
-    const taskIds = tasks.map((task) => String(task.id));
-    return { createdTaskCount: taskIds.length, taskIds, boundDeviceCount: taskIds.length, skippedDeviceCount: 0, reasonCode: taskIds.length ? null : 'no_bound_devices' };
+    this.findProduct(productId);
+    return this.refreshLinkedProductDevices(productId, 'product_refresh');
   }
 
   @Get('templates')
@@ -522,15 +511,28 @@ export class LocalCloudController {
   }
 
   @Post('templates/:templateId/publish')
-  publishTemplate(@Param('templateId') templateId: string) {
+  async publishTemplate(@Param('templateId') templateId: string, @Body() body: Row) {
     const current = this.findTemplate(templateId);
-    this.upsertTemplate({
+    const template = this.upsertTemplate({
       ...current,
       status: 'published',
       version: numberValue(current.version, 1) + 1,
       previewImageUrl: this.templatePreviewUrl(templateId),
     });
-    return { ok: true };
+    const refreshLinkedDevices = body.refreshLinkedDevices !== false;
+    const refresh = refreshLinkedDevices
+      ? await this.refreshTemplateLinkedDevices(templateId, 'template_publish_refresh')
+      : {
+          attempted: false,
+          boundDeviceCount: this.localDevices().filter((item) => item.templateId === templateId).length,
+          refreshableDeviceCount: 0,
+          skippedDeviceCount: 0,
+          createdTaskCount: 0,
+          taskIds: [],
+          reasonCode: null,
+          message: '模板已发布，未自动下发',
+        };
+    return { ok: true, template, refresh };
   }
 
   @Post('templates/:templateId/duplicate')
@@ -985,6 +987,60 @@ export class LocalCloudController {
     this.db.cloudTasks.set(String(task.id), task);
     this.db.save();
     return task;
+  }
+
+  private resolveEffectiveTemplateForLabel(label: Label & Row) {
+    const product = label.productId ? this.db.cloudProducts.get(String(label.productId)) ?? null : null;
+    const templateId = stringValue(label.templateId, stringValue(product?.defaultTemplateId));
+    return templateId ? this.db.cloudTemplates.get(templateId) ?? null : null;
+  }
+
+  private isRefreshableTemplate(template: Row | null | undefined) {
+    return Boolean(template && stringValue(template.status, 'draft') === 'published');
+  }
+
+  private async refreshLinkedProductDevices(productId: string, taskType: string) {
+    const labels = [...this.db.labels.values()]
+      .map((label) => label as Label & Row)
+      .filter((label) => String(label.productId ?? '') === productId);
+    const refreshableLabels = labels.filter((label) => this.isRefreshableTemplate(this.resolveEffectiveTemplateForLabel(label)));
+    const tasks = await Promise.all(refreshableLabels.map((label) => this.createRefreshTask(label.id, taskType)));
+    const taskIds = tasks.map((task) => String(task.id));
+    const missingTemplateCount = labels.length - refreshableLabels.length;
+    return {
+      attempted: true,
+      boundDeviceCount: labels.length,
+      refreshableDeviceCount: refreshableLabels.length,
+      skippedDeviceCount: missingTemplateCount,
+      createdTaskCount: taskIds.length,
+      taskIds,
+      reasonCode: labels.length ? (refreshableLabels.length ? null : 'no_template') : 'no_bound_devices',
+      message: taskIds.length
+        ? `商品已更新，已自动创建 ${taskIds.length} 个标签刷新任务`
+        : labels.length
+          ? '商品已更新，但绑定标签没有已发布模板，未自动下发'
+          : '商品已更新，但没有绑定标签，未自动下发',
+    };
+  }
+
+  private async refreshTemplateLinkedDevices(templateId: string, taskType: string) {
+    const labels = [...this.db.labels.values()]
+      .map((label) => label as Label & Row)
+      .filter((label) => String(label.templateId ?? '') === templateId);
+    const tasks = await Promise.all(labels.map((label) => this.createRefreshTask(label.id, taskType)));
+    const taskIds = tasks.map((task) => String(task.id));
+    return {
+      attempted: true,
+      boundDeviceCount: labels.length,
+      refreshableDeviceCount: labels.length,
+      skippedDeviceCount: 0,
+      createdTaskCount: taskIds.length,
+      taskIds,
+      reasonCode: labels.length ? null : 'no_bound_devices',
+      message: taskIds.length
+        ? `模板已发布，已自动创建 ${taskIds.length} 个标签刷新任务`
+        : '模板已发布，但没有绑定标签，未自动下发',
+    };
   }
 
   private async deliverRefreshTask(label: Label, render: RenderedTemplateImage, taskId: unknown) {

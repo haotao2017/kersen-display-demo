@@ -1,17 +1,19 @@
 import { http } from '../services/http';
 import type { AuditLog, DashboardSummary, Paginated, Product, Template, TemplateSchema, EslDevice, Ap, PushTask, User, UserInvite, DeviceDetail, TemplatePreview, UploadImageResult } from '../types/domain';
 
+export interface RefreshLinkedResult {
+  attempted: boolean;
+  boundDeviceCount: number;
+  refreshableDeviceCount: number;
+  skippedDeviceCount: number;
+  createdTaskCount: number;
+  taskIds: string[];
+  reasonCode: 'no_bound_devices' | 'no_template' | null;
+  message: string;
+}
+
 export interface ProductUpdateResult extends Product {
-  refresh: {
-    attempted: boolean;
-    boundDeviceCount: number;
-    refreshableDeviceCount: number;
-    skippedDeviceCount: number;
-    createdTaskCount: number;
-    taskIds: string[];
-    reasonCode: 'no_bound_devices' | 'no_template' | null;
-    message: string;
-  };
+  refresh: RefreshLinkedResult;
 }
 
 export interface ProductRefreshResult {
@@ -42,7 +44,7 @@ export const api = {
   templateSchema: (id: string) => http.get<{ schema: TemplateSchema }>(`/templates/${id}/schema`),
   saveTemplateSchema: (id: string, schema: TemplateSchema) => http.put<{ schema: TemplateSchema }>(`/templates/${id}/schema`, { schema }),
   previewTemplate: (id: string, sampleData: Record<string, unknown>) => http.post<TemplatePreview>(`/templates/${id}/preview`, { sampleData }),
-  publishTemplate: (id: string, refreshLinkedDevices = false) => http.post<{ ok: boolean }>(`/templates/${id}/publish`, { refreshLinkedDevices }),
+  publishTemplate: (id: string, refreshLinkedDevices = false) => http.post<{ ok: boolean; template?: Template; refresh?: RefreshLinkedResult }>(`/templates/${id}/publish`, { refreshLinkedDevices }),
   duplicateTemplate: (id: string, payload: { name: string; code: string }) => http.post<Template>(`/templates/${id}/duplicate`, payload),
   deleteTemplate: (id: string) => http.delete<{ deleted: boolean; id: string }>(`/templates/${id}`),
   deleteTemplateVersion: (id: string, versionId: string) => http.delete<{ deleted: boolean; versionId: string }>(`/templates/${id}/versions/${versionId}`),
