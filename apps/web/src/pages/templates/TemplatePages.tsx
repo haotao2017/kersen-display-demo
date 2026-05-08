@@ -202,43 +202,11 @@ const TemplatePreviewThumbnail = ({
   );
 };
 
-const ensureBackgroundImageSchema = (schema: any) => {
+const ensureDesignerSchema = (schema: any) => {
   const elements = Array.isArray(schema?.elements) ? schema.elements : [];
-  const meta = schema?.meta ?? {};
-  const width = Number(meta.width ?? 296);
-  const height = Number(meta.height ?? 128);
-  const hasBackground = elements.some((item: any) => isBackgroundImageElement(item, { width, height }));
-  if (hasBackground) return schema;
-
   return {
     ...schema,
-    elements: [
-      {
-        id: generateId(),
-        type: 'image',
-        x: 0,
-        y: 0,
-        width,
-        height,
-        rotate: 0,
-        visible: true,
-        zIndex: 1,
-        bindingField: null,
-        expression: SAMPLE_IMAGE_URL,
-        style: {
-          fontSize: 14,
-          fontWeight: 'normal',
-          textAlign: 'left',
-          fill: '#111111',
-          stroke: '#d0d0d0',
-          background: '#ffffff',
-        },
-      },
-      ...elements.map((item: any) => ({
-        ...item,
-        zIndex: Math.max(2, typeof item?.zIndex === 'number' ? item.zIndex + 1 : 2),
-      })),
-    ],
+    elements,
   };
 };
 
@@ -249,12 +217,12 @@ const sanitizeDesignerSchema = (schema: any) => {
   const height = Number(meta.height ?? 0);
 
   if (!width || !height) {
-    return ensureBackgroundImageSchema(schema);
+    return ensureDesignerSchema(schema);
   }
 
   const backgroundCandidates = elements.filter((item: any) => isBackgroundImageElement(item, { width, height }));
   if (!backgroundCandidates.length) {
-    return ensureBackgroundImageSchema(schema);
+    return ensureDesignerSchema(schema);
   }
   if (backgroundCandidates.length <= 1) {
     return schema;
@@ -383,7 +351,7 @@ const createDesignerElement = (
       width: canvas?.width ?? 120,
       height: canvas?.height ?? 90,
       bindingField: null,
-      expression: SAMPLE_IMAGE_URL,
+      expression: null,
       style: { ...defaults.style, stroke: '#d0d0d0' },
     };
   }
@@ -1223,13 +1191,8 @@ export const TemplateDesignerPage = () => {
     value: field.id,
   }));
   const selectedStyle = useMemo(() => selectedElement?.style ?? {}, [selectedElement]);
-  const protectedElementIds = useMemo(
-    () => schema?.elements.filter((item) => isBackgroundImageElement(item, schema.meta)).map((item) => item.id) ?? [],
-    [schema],
-  );
-  const editableSelectedIds = selectedElementIds.filter((item) => !protectedElementIds.includes(item));
-  const editableSelectedElements = selectedElements.filter((item) => !protectedElementIds.includes(item.id));
-  const selectedIsProtected = selectedElement ? protectedElementIds.includes(selectedElement.id) : false;
+  const editableSelectedIds = selectedElementIds;
+  const editableSelectedElements = selectedElements;
   const selectedKind = selectedElement?.type === 'image'
     ? 'image'
     : selectedElement?.type === 'rect' || selectedElement?.type === 'line'
@@ -1407,7 +1370,7 @@ export const TemplateDesignerPage = () => {
       }
       if ((event.key === 'Delete' || event.key === 'Backspace') && selectedElementIds.length) {
         event.preventDefault();
-        if (editableSelectedIds.length) removeElements(editableSelectedIds);
+        removeElements(selectedElementIds);
         return;
       }
       if (editableSelectedIds.length && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
@@ -1844,16 +1807,16 @@ export const TemplateDesignerPage = () => {
               <Button size="small" onClick={() => alignSelectedElement('bottom')} disabled={!editableSelectedIds.length}>{tx('底对齐', 'Align Bottom')}</Button>
               <Divider type="vertical" style={{ marginInline: 0 }} />
               <Tooltip title={tx('上移一层', 'Bring Forward')}>
-                <Button size="small" icon={<VerticalAlignTopOutlined />} onClick={() => selectedElementId && !selectedIsProtected && bringForward(selectedElementId)} disabled={!selectedElementId || selectedIsProtected} />
+                <Button size="small" icon={<VerticalAlignTopOutlined />} onClick={() => selectedElementId && bringForward(selectedElementId)} disabled={!selectedElementId} />
               </Tooltip>
               <Tooltip title={tx('下移一层', 'Send Backward')}>
-                <Button size="small" icon={<VerticalAlignBottomOutlined />} onClick={() => selectedElementId && !selectedIsProtected && sendBackward(selectedElementId)} disabled={!selectedElementId || selectedIsProtected} />
+                <Button size="small" icon={<VerticalAlignBottomOutlined />} onClick={() => selectedElementId && sendBackward(selectedElementId)} disabled={!selectedElementId} />
               </Tooltip>
               <Tooltip title={tx('置于最上层', 'Bring to Front')}>
-                <Button size="small" icon={<ToTopOutlined rotate={180} />} onClick={() => selectedElementId && !selectedIsProtected && bringToFront(selectedElementId)} disabled={!selectedElementId || selectedIsProtected} />
+                <Button size="small" icon={<ToTopOutlined rotate={180} />} onClick={() => selectedElementId && bringToFront(selectedElementId)} disabled={!selectedElementId} />
               </Tooltip>
               <Tooltip title={tx('置于最下层', 'Send to Back')}>
-                <Button size="small" icon={<ToTopOutlined />} onClick={() => selectedElementId && !selectedIsProtected && sendToBack(selectedElementId)} disabled={!selectedElementId || selectedIsProtected} />
+                <Button size="small" icon={<ToTopOutlined />} onClick={() => selectedElementId && sendToBack(selectedElementId)} disabled={!selectedElementId} />
               </Tooltip>
               <Tag color="processing">{tx('元素', 'Elements')} {schema.elements.length} / {tx('已选', 'Selected')} {selectedElementIds.length}</Tag>
             </Space>
@@ -1923,7 +1886,7 @@ export const TemplateDesignerPage = () => {
                           key={element.id}
                           element={element}
                           isSelected={selectedElementIds.includes(element.id)}
-                          locked={isBackgroundImageElement(element, schema.meta)}
+                          locked={false}
                           onSelect={(evt) => select(element.id, evt?.evt?.shiftKey ? { toggle: true } : undefined)}
                           onNodeReady={registerNode}
                           onMove={(patch) => {
@@ -2053,11 +2016,6 @@ export const TemplateDesignerPage = () => {
                     <Form.Item label={tx('类型', 'Type')}>
                       <Input value={selectedElement.type} disabled />
                     </Form.Item>
-                    {selectedIsProtected ? (
-                      <Form.Item label={tx('底图说明', 'Background Layer')}>
-                        <Input.TextArea rows={3} value={tx('这是整张标签的底图层。商品上传图片后，会默认全屏显示在这里；上面的文字、价格、条码等元素再叠加显示。', 'This is the full-label background layer. When a product image is uploaded, it fills this layer automatically, while text, price, and barcode elements are placed above it.')} disabled />
-                      </Form.Item>
-                    ) : null}
                     {selectedCanBind ? (
                       <Form.Item label={tx('绑定字段', 'Binding Field')}>
                         <Select
@@ -2106,12 +2064,12 @@ export const TemplateDesignerPage = () => {
                     <Row gutter={10}>
                       <Col span={12}>
                         <Form.Item label="X">
-                          <InputNumber style={{ width: '100%' }} value={selectedElement.x} onChange={(value) => updateElement(selectedElement.id, { x: Number(value ?? 0) })} disabled={selectedIsProtected} />
+                          <InputNumber style={{ width: '100%' }} value={selectedElement.x} onChange={(value) => updateElement(selectedElement.id, { x: Number(value ?? 0) })} />
                         </Form.Item>
                       </Col>
                       <Col span={12}>
                         <Form.Item label="Y">
-                          <InputNumber style={{ width: '100%' }} value={selectedElement.y} onChange={(value) => updateElement(selectedElement.id, { y: Number(value ?? 0) })} disabled={selectedIsProtected} />
+                          <InputNumber style={{ width: '100%' }} value={selectedElement.y} onChange={(value) => updateElement(selectedElement.id, { y: Number(value ?? 0) })} />
                         </Form.Item>
                       </Col>
                     </Row>
@@ -2119,12 +2077,12 @@ export const TemplateDesignerPage = () => {
                     <Row gutter={10}>
                       <Col span={12}>
                         <Form.Item label={tx('宽', 'Width')}>
-                          <InputNumber style={{ width: '100%' }} value={selectedElement.width} onChange={(value) => updateElement(selectedElement.id, { width: Math.max(1, Number(value ?? 1)) })} disabled={selectedIsProtected || (selectedIsTextElement && selectedStyle.autoSize === true)} />
+                          <InputNumber style={{ width: '100%' }} value={selectedElement.width} onChange={(value) => updateElement(selectedElement.id, { width: Math.max(1, Number(value ?? 1)) })} disabled={selectedIsTextElement && selectedStyle.autoSize === true} />
                         </Form.Item>
                       </Col>
                       <Col span={12}>
                         <Form.Item label={tx('高', 'Height')}>
-                          <InputNumber style={{ width: '100%' }} value={selectedElement.height} onChange={(value) => updateElement(selectedElement.id, { height: Math.max(1, Number(value ?? 1)) })} disabled={selectedIsProtected || (selectedIsTextElement && selectedStyle.autoSize === true)} />
+                          <InputNumber style={{ width: '100%' }} value={selectedElement.height} onChange={(value) => updateElement(selectedElement.id, { height: Math.max(1, Number(value ?? 1)) })} disabled={selectedIsTextElement && selectedStyle.autoSize === true} />
                         </Form.Item>
                       </Col>
                     </Row>

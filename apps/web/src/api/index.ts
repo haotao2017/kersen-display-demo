@@ -53,6 +53,7 @@ export const api = {
   bindDevice: (id: string, payload: { productId: string; templateId?: string; autoRefresh?: boolean }) => http.post<DeviceDetail>(`/esl-devices/${id}/bind`, payload),
   unbindDevice: (id: string) => http.post<DeviceDetail>(`/esl-devices/${id}/unbind`, { reason: 'manual unbind' }),
   refreshDevice: (id: string) => http.post<{ ok: boolean }>(`/esl-devices/${id}/refresh`, { force: true }),
+  silentWakeDevice: (id: string, payload?: { apId?: string; waitMs?: number }) => http.post<{ ok: boolean; conclusion?: string; labels?: Array<{ detail?: string }> }>(`/esl-devices/${id}/silent-wake`, payload ?? {}),
   adjustDevice: (id: string, options: Record<string, unknown>) => http.post<{ ok: boolean }>(`/esl-devices/${id}/adjust`, { options }),
   deviceTasks: (id: string) => http.get<PushTask[]>(`/esl-devices/${id}/tasks`),
   aps: (params?: Record<string, unknown>) => http.get<Paginated<Ap>>('/aps', { params }),

@@ -61,6 +61,7 @@ type LocalImagePacket = {
   height: number;
 };
 type ScreenPreset = {
+  key: string;
   width: number;
   height: number;
   service: '01-00-00-03' | '01-00-00-0c';
@@ -72,23 +73,62 @@ type ScreenPreset = {
   mirrorX: boolean;
   mode: string;
 };
+type SilentWakeResult = {
+  labelId: string;
+  trackingId?: string;
+  ok: boolean;
+  state: 'online' | 'offline' | 'waking' | 'unknown';
+  stage: 'conn_dev_ok' | 'conn_dev_failed' | 'timeout' | 'not_sent';
+  detail: string;
+  errno?: number;
+  cmdType?: string;
+  traceStatus?: string;
+};
 
 const now = () => new Date().toISOString();
 const id = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const uploadDir = join(process.cwd(), 'uploads');
 const SVG_FONT_STACK = 'Arial, Microsoft YaHei, sans-serif';
 const OFFLINE_AFTER_MS = Number(process.env.AP_OFFLINE_AFTER_SECONDS ?? 90) * 1000;
 
 const SCREEN_PRESETS: ScreenPreset[] = [
-  { width: 800, height: 480, service: '01-00-00-0c', magic: 0x0c, bpp: 2, supersize: true, mtu: 10000, rotate: 0, mirrorX: false, mode: '0C 800x480' },
-  { width: 648, height: 480, service: '01-00-00-03', magic: 0x0a, bpp: 2, rotate: 0, mirrorX: false, mode: '03-0A 648x480#b0y2r3w1' },
-  { width: 400, height: 300, service: '01-00-00-03', magic: 0x04, bpp: 2, rotate: 0, mirrorX: false, mode: '03-04 400x300#b0y2r3w1' },
-  { width: 240, height: 416, service: '01-00-00-03', magic: 0x04, bpp: 2, rotate: 90, mirrorX: true, mode: '03-04 240x416#b0y2r3w1' },
-  { width: 184, height: 384, service: '01-00-00-03', magic: 0x03, bpp: 2, rotate: 90, mirrorX: false, mode: '03-03 184x384#b0y2r3w1' },
-  { width: 152, height: 296, service: '01-00-00-03', magic: 0x02, bpp: 2, rotate: 90, mirrorX: true, mode: '03-02 152x296#b0y2r3w1' },
-  { width: 128, height: 296, service: '01-00-00-03', magic: 0x02, bpp: 2, rotate: 90, mirrorX: true, mode: '03-02 128x296#b0y2r3w1' },
-  { width: 200, height: 200, service: '01-00-00-03', magic: 0x02, bpp: 2, rotate: 90, mirrorX: false, mode: '03-02 200x200#b0y2r3w1' },
-  { width: 128, height: 250, service: '01-00-00-03', magic: 0x01, bpp: 2, rotate: 90, mirrorX: false, mode: '03-01 128x250#b0y2r3w1' },
+  { key: '17900170', width: 800, height: 480, service: '01-00-00-0c', magic: 0x0c, bpp: 2, supersize: true, mtu: 10000, rotate: 0, mirrorX: false, mode: '0C 800x480' },
+  { key: '1770008e', width: 648, height: 480, service: '01-00-00-03', magic: 0x0a, bpp: 2, rotate: 0, mirrorX: false, mode: '03-0A 648x480#b0y2r3w1' },
+  { key: '176002f7', width: 400, height: 300, service: '01-00-00-03', magic: 0x04, bpp: 2, rotate: 0, mirrorX: false, mode: '03-04 400x300#b0y2r3w1' },
+  { key: '17500175', width: 240, height: 416, service: '01-00-00-03', magic: 0x04, bpp: 2, rotate: 90, mirrorX: true, mode: '03-04 240x416#b0y2r3w1' },
+  { key: '174004d2', width: 184, height: 384, service: '01-00-00-03', magic: 0x03, bpp: 2, rotate: 90, mirrorX: false, mode: '03-03 184x384#b0y2r3w1' },
+  { key: '17200227', width: 152, height: 296, service: '01-00-00-03', magic: 0x02, bpp: 2, rotate: 90, mirrorX: true, mode: '03-02 152x296#b0y2r3w1' },
+  { key: '173014d6', width: 128, height: 296, service: '01-00-00-03', magic: 0x02, bpp: 2, rotate: 90, mirrorX: true, mode: '03-02 128x296#b0y2r3w1' },
+  { key: '1700009f', width: 200, height: 200, service: '01-00-00-03', magic: 0x02, bpp: 2, rotate: 90, mirrorX: false, mode: '03-02 200x200#b0y2r3w1' },
+  { key: '1710408c', width: 128, height: 250, service: '01-00-00-03', magic: 0x01, bpp: 2, rotate: 90, mirrorX: false, mode: '03-01 128x250#b0y2r3w1' },
+  { key: '15403fca', width: 128, height: 250, service: '01-00-00-03', magic: 0x01, bpp: 1, rotate: 90, mirrorX: false, mode: '03 128x250' },
+];
+
+const LABEL_PRESET_KEYS: Record<string, string> = {
+  '17900170': '17900170',
+  '1770008e': '1770008e',
+  '176002f7': '176002f7',
+  '17500175': '17500175',
+  '174004d2': '174004d2',
+  '173014d6': '173014d6',
+  '17200227': '17200227',
+  '1710408c': '1710408c',
+  '1700009f': '1700009f',
+  '15403fca': '15403fca',
+};
+
+const LABEL_PREFIX_PRESET_KEYS: Array<{ prefix: string; key: string }> = [
+  { prefix: '179', key: '17900170' },
+  { prefix: '177', key: '1770008e' },
+  { prefix: '176', key: '176002f7' },
+  { prefix: '175', key: '17500175' },
+  { prefix: '174', key: '174004d2' },
+  { prefix: '173', key: '173014d6' },
+  { prefix: '172', key: '17200227' },
+  { prefix: '171', key: '1710408c' },
+  { prefix: '170', key: '1700009f' },
+  { prefix: '154', key: '15403fca' },
 ];
 
 function paginate<T>(items: T[], query?: Row) {
@@ -109,6 +149,12 @@ function stringValue(value: unknown, fallback = '') {
 function numberValue(value: unknown, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function readBool(value: unknown, fallback: boolean) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value === 'true' ? true : value === 'false' ? false : fallback;
+  return fallback;
 }
 
 function isRecentActivity(value?: string) {
@@ -217,29 +263,7 @@ function defaultSchema(template: Row) {
       version: numberValue(template.version, 1),
     },
     datasource: ['name', 'price', 'sku', 'barcode', 'imageUrl'],
-    elements: [
-      {
-        id: 'background',
-        type: 'image',
-        x: 0,
-        y: 0,
-        width,
-        height,
-        rotate: 0,
-        visible: true,
-        zIndex: 1,
-        bindingField: null,
-        expression: 'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=900&q=80',
-        style: {
-          fontSize: 14,
-          fontWeight: 'normal',
-          textAlign: 'left',
-          fill: '#111111',
-          stroke: '#d0d0d0',
-          background: '#ffffff',
-        },
-      },
-    ],
+    elements: [],
   };
 }
 
@@ -617,6 +641,34 @@ export class LocalCloudController {
   async refreshDevice(@Param('deviceId') deviceId: string) {
     const task = await this.createRefreshTask(deviceId, 'manual_refresh');
     return { ok: true, taskId: task.id };
+  }
+
+  @Post('esl-devices/:deviceId/silent-wake')
+  async silentWakeDevice(@Param('deviceId') deviceId: string, @Body() body: Row) {
+    const label = this.findLabel(deviceId);
+    return this.runSilentWake([label.id], {
+      apId: stringValue(body.apId, label.apId),
+      waitMs: numberValue(body.waitMs, 8000),
+      psmDurationMs: numberValue(body.psmDurationMs, 8000),
+      sendMqtt: readBool(body.sendMqtt, true),
+      sendWs: readBool(body.sendWs, true),
+      disconnectAfterProbe: readBool(body.disconnectAfterProbe, true),
+    });
+  }
+
+  @Post('labels/silent-wake')
+  async silentWakeLabels(@Body() body: Row) {
+    const labelIds = Array.isArray(body.labelIds)
+      ? body.labelIds.map((item) => stringValue(item).toLowerCase()).filter(Boolean)
+      : [stringValue(body.labelId).toLowerCase()].filter(Boolean);
+    return this.runSilentWake(labelIds, {
+      apId: stringValue(body.apId) || undefined,
+      waitMs: numberValue(body.waitMs, 8000),
+      psmDurationMs: numberValue(body.psmDurationMs, 8000),
+      sendMqtt: readBool(body.sendMqtt, true),
+      sendWs: readBool(body.sendWs, true),
+      disconnectAfterProbe: readBool(body.disconnectAfterProbe, true),
+    });
   }
 
   @Post('esl-devices/:deviceId/adjust')
@@ -1006,6 +1058,227 @@ export class LocalCloudController {
     };
   }
 
+  private async runSilentWake(
+    labelIdsInput: string[],
+    options: {
+      apId?: string;
+      waitMs: number;
+      psmDurationMs: number;
+      sendMqtt: boolean;
+      sendWs: boolean;
+      disconnectAfterProbe: boolean;
+    },
+  ) {
+    const labelIds = [...new Set(labelIdsInput.map((item) => stringValue(item).toLowerCase()).filter(Boolean))];
+    if (!labelIds.length) {
+      return { ok: false, reason: 'no_labels', message: '至少要提供一个价签编号' };
+    }
+
+    const labels = labelIds.map((labelId) => this.db.labels.get(labelId)).filter(Boolean) as Label[];
+    const apId = options.apId
+      || labels.map((label) => label.apId).find(Boolean)
+      || [...this.db.baseStations.values()].find((item) => item.status === 'online')?.id;
+    if (!apId) {
+      return { ok: false, reason: 'no_online_ap', message: '没有可用的在线基站，无法执行无感唤醒', labelIds };
+    }
+
+    const storeCode = labels[0]?.storeCode ?? [...this.db.stores.values()][0]?.code ?? process.env.UPSTREAM_STORE_CODE ?? '20248517';
+    const waitMs = Math.max(3000, Math.min(30000, options.waitMs || 8000));
+    const psmDurationMs = Math.max(3000, Math.min(30000, options.psmDurationMs || 8000));
+    const startedAt = now();
+
+    await this.dispatchSilentWakeCommand(apId, storeCode, this.buildSilentServiceConfigCommand(), options);
+    await wait(250);
+    await this.dispatchSilentWakeCommand(apId, storeCode, this.buildSilentPsmCommand(psmDurationMs), options);
+    await wait(250);
+
+    const results: SilentWakeResult[] = [];
+    for (const labelId of labelIds) {
+      const delivery = await this.dispatchSilentWakeCommand(
+        apId,
+        storeCode,
+        this.buildSilentProbeCommand(labelId, options.disconnectAfterProbe),
+        options,
+      );
+      const trackingId = delivery.websocket && typeof delivery.websocket === 'object' && 'trackingId' in delivery.websocket
+        ? (delivery.websocket as { trackingId?: string }).trackingId
+        : undefined;
+      const result = await this.waitForSilentWakeResult(apId, labelId, trackingId, waitMs);
+      this.updateSilentWakeConnectivity(labelId, result);
+      results.push(result);
+      await wait(200);
+    }
+
+    this.db.save();
+    const onlineCount = results.filter((item) => item.state === 'online').length;
+    const wakingCount = results.filter((item) => item.state === 'waking').length;
+    return {
+      ok: onlineCount === labelIds.length,
+      partial: onlineCount > 0 && onlineCount < labelIds.length,
+      mode: 'wake',
+      startedAt,
+      finishedAt: now(),
+      apId,
+      storeCode,
+      total: labelIds.length,
+      onlineCount,
+      wakingCount,
+      labels: results,
+      conclusion: onlineCount === labelIds.length
+        ? '所有目标价签都已通过无感连接验证，可视为在线。'
+        : wakingCount > 0
+          ? '部分价签仍处于唤醒中，AP 已开始尝试建立连接，但尚未全部拿到成功反馈。'
+          : '没有拿到明确的无感在线反馈，当前仍不能视为稳定在线。',
+    };
+  }
+
+  private async dispatchSilentWakeCommand(
+    apId: string,
+    storeCode: string,
+    command: Row,
+    options: { sendMqtt: boolean; sendWs: boolean },
+  ) {
+    const topic = `${storeCode}/${apId}/cmd`;
+    let mqtt: Row = { ok: false, skipped: true };
+    if (options.sendMqtt) {
+      try {
+        await this.mqtt.publishJson(topic, command, { retain: false });
+        mqtt = { ok: true, topic };
+      } catch (error) {
+        mqtt = { ok: false, topic, reason: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    const websocket = options.sendWs ? this.apWebsocket.sendRaw(apId, command) : { ok: false, skipped: true };
+    return { mqtt, websocket };
+  }
+
+  private buildSilentServiceConfigCommand() {
+    return {
+      type: 'AP_SVC_CFG',
+      adv_group: 32,
+      adv_psm_interval_sec: 60,
+      adv_listen_slave_enable: true,
+      adv_psm_cfg: {
+        enable: true,
+        duration_ms: 5000,
+        act_time_us: 3000,
+        slp_cycle_ms: 4000,
+        adv_interval_ms: 60000,
+        adv_map: 7,
+        wait_conn_ch_idx: 10,
+      },
+      rd_wr_svc_cfg: {
+        retry_num: 3,
+        parallel_num: 3,
+        ap_chn_num: 255,
+      },
+    };
+  }
+
+  private buildSilentPsmCommand(durationMs: number) {
+    return {
+      type: 'AP_PSM',
+      data: {
+        mode: 'fast',
+        adv_group: 32,
+        merge: {
+          enable: true,
+          duration_ms: durationMs,
+          act_time_us: 3000,
+          slp_cycle_ms: 4000,
+          adv_interval_ms: 60000,
+          retry_num: 3,
+          parallel_num: 3,
+          ap_chn_num: 255,
+        },
+      },
+    };
+  }
+
+  private buildSilentProbeCommand(labelId: string, disconnectAfterProbe: boolean) {
+    return {
+      type: 'READ_WRITE_SVC',
+      opas: [
+        {
+          addr: labelId,
+          cmds: [
+            { id: 0, type: 'CONN_DEV' },
+            ...(disconnectAfterProbe ? [{ id: 1, type: 'DIS_CONN' }] : []),
+          ],
+        },
+      ],
+    };
+  }
+
+  private async waitForSilentWakeResult(apId: string, labelId: string, trackingId: string | undefined, timeoutMs: number): Promise<SilentWakeResult> {
+    if (!trackingId) {
+      return { labelId, ok: false, state: 'unknown', stage: 'not_sent', detail: '没有拿到 WebSocket trackingId，无法执行无感唤醒' };
+    }
+
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const trace = this.apWebsocket.getDownlinkTrace(apId, trackingId);
+      const row = trace && typeof trace === 'object' ? trace as Row : undefined;
+      const reply = row?.reply && typeof row.reply === 'object' ? row.reply as Row : undefined;
+      const payload = reply?.payload && typeof reply.payload === 'object' ? reply.payload as Row : undefined;
+      const cmd = payload?.cmd && typeof payload.cmd === 'object' ? payload.cmd as Row : undefined;
+      const res = payload?.res && typeof payload.res === 'object' ? payload.res as Row : undefined;
+      const cmdType = typeof cmd?.type === 'string' ? cmd.type : undefined;
+      const errno = typeof res?.errno === 'number' ? res.errno : undefined;
+      const traceStatus = typeof row?.status === 'string' ? row.status : undefined;
+
+      if ((cmdType === 'CONN_DEV' || cmdType === 'DIS_CONN') && errno === 0) {
+        return {
+          labelId,
+          trackingId,
+          ok: true,
+          state: 'online',
+          stage: 'conn_dev_ok',
+          detail: cmdType === 'DIS_CONN' ? '已收到 DIS_CONN 成功回包，说明前置连接阶段已完成' : '已收到 CONN_DEV 成功回包，标签当前可视为在线',
+          errno,
+          cmdType,
+          traceStatus,
+        };
+      }
+
+      if (cmdType === 'CONN_DEV' && typeof errno === 'number' && errno !== 0) {
+        return {
+          labelId,
+          trackingId,
+          ok: false,
+          state: 'offline',
+          stage: 'conn_dev_failed',
+          detail: `无感唤醒失败：CONN_DEV errno=${errno}`,
+          errno,
+          cmdType,
+          traceStatus,
+        };
+      }
+
+      await wait(400);
+    }
+
+    return { labelId, trackingId, ok: false, state: 'waking', stage: 'timeout', detail: '无感唤醒超时：AP 已开始尝试连接，但还没有拿到明确成功/失败回包' };
+  }
+
+  private updateSilentWakeConnectivity(labelId: string, result: SilentWakeResult) {
+    const current = this.db.labels.get(labelId);
+    if (!current) return;
+    const row = current as Label & Row;
+    row.status = result.state === 'online' ? 'online' : result.state === 'waking' ? current.status : 'offline';
+    row.connectivity = {
+      mode: 'silent_wake',
+      state: result.state,
+      checkedAt: now(),
+      detail: `无感唤醒：${result.detail}`,
+      trackingId: result.trackingId,
+    };
+    if (result.state === 'online') {
+      row.updatedAt = now();
+    }
+    this.db.labels.set(labelId, row);
+  }
+
   private async buildLocalReadWritePacket(storeCode: string, apId: string, labelId: string, render: RenderedTemplateImage): Promise<LocalImagePacket> {
     const normalizedAp = apId.trim();
     const apUpper = normalizedAp.toUpperCase();
@@ -1018,7 +1291,7 @@ export class LocalCloudController {
       `${storeCode}/${apNoColonUpper}/cmd`,
       `${storeCode}/${apNoColonLower}/cmd`,
     ])];
-    const preset = this.resolveScreenPreset(render);
+    const preset = this.resolveScreenPreset(render, labelId);
     const sourceRgba = preset.service === '01-00-00-0c'
       ? await this.renderIntoService0cCanvas(render, preset.width, preset.height)
       : await this.transformRenderedRgba(render.rgba, render.width, render.height, preset.width, preset.height, preset.rotate, preset.mirrorX);
@@ -1039,7 +1312,7 @@ export class LocalCloudController {
               service: preset.service,
               b64dat: imageBytes.toString('base64'),
               ...(preset.supersize ? { supersize: true, mtu: preset.mtu ?? 10000 } : {}),
-              ...(preset.service === '01-00-00-03' ? { bigsize: preset.bpp !== 1 } : {}),
+              ...(preset.service === '01-00-00-03' ? { bigsize: false, mtu: preset.mtu ?? 10000 } : {}),
             },
           ],
         },
@@ -1143,7 +1416,13 @@ export class LocalCloudController {
     ].join('');
   }
 
-  private resolveScreenPreset(render: RenderedTemplateImage) {
+  private resolveScreenPreset(render: RenderedTemplateImage, labelId?: string) {
+    const normalizedLabelId = stringValue(labelId).toLowerCase();
+    const explicitKey = LABEL_PRESET_KEYS[normalizedLabelId]
+      ?? LABEL_PREFIX_PRESET_KEYS.find((item) => normalizedLabelId.startsWith(item.prefix))?.key;
+    const explicit = explicitKey ? SCREEN_PRESETS.find((preset) => preset.key === explicitKey) : undefined;
+    if (explicit) return explicit;
+
     const exact = SCREEN_PRESETS.find((preset) => preset.width === render.width && preset.height === render.height);
     if (exact) return exact;
     const rotated = SCREEN_PRESETS.find((preset) => preset.width === render.height && preset.height === render.width);
@@ -1230,13 +1509,13 @@ export class LocalCloudController {
 
   private packImage1Bpp(rgba: Buffer, width: number, height: number) {
     const rowBytes = Math.ceil(width / 8);
-    const output = Buffer.alloc(rowBytes * height);
+    const output = Buffer.alloc(rowBytes * height, 0xff);
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
         const offset = (y * width + x) * 4;
         const lum = rgba[offset] * 0.299 + rgba[offset + 1] * 0.587 + rgba[offset + 2] * 0.114;
         if (lum < 160) {
-          output[y * rowBytes + Math.floor(x / 8)] |= 1 << (7 - (x % 8));
+          output[y * rowBytes + Math.floor(x / 8)] &= ~(1 << (7 - (x % 8)));
         }
       }
     }

@@ -1542,9 +1542,10 @@ export class ApWebsocketService {
       resultMsg = `已下发（待执行确认），tracking=${trace.id}`;
     } else if (trace.status === 'ap_reply_seen' && replyType === 'READ_WRITE_SVC' && cmdType === 'WRITE_SVC') {
       const ackSendOk = ack === undefined || send === undefined || ack === send;
-      if (errno === 0 && ackSendOk) {
+      if (errno === 0) {
         nextStatus = 'success';
-        resultMsg = `执行确认成功：${replyPrefix} · cmd=WRITE_SVC · ${ackSendText} · ${errnoText}${writeText} · 执行确认成功（已收到设备执行结果（errno=0））`;
+        const ackWarning = ackSendOk ? '' : ' · 警告：设备确认包数量不一致，但设备返回 errno=0，按执行成功处理';
+        resultMsg = `执行确认成功：${replyPrefix} · cmd=WRITE_SVC · ${ackSendText} · ${errnoText}${writeText} · 执行确认成功（已收到设备执行结果（errno=0））${ackWarning}`;
       } else {
         nextStatus = 'failed';
         const reason = errno !== undefined && errno !== 0
@@ -1678,8 +1679,37 @@ export class ApWebsocketService {
       return;
     }
 
-    // READ_WRITE_SVC 的 CONN_DEV / DIS_CONN 不是刷图执行结果，避免误绑定到当前 trace。
+    const errno = parsed.res && typeof parsed.res === 'object'
+      ? (parsed.res as Record<string, unknown>).errno
+      : undefined;
+
+    // READ_WRITE_SVC 的 CONN_DEV / DIS_CONN 不是刷图成功结果；
+    // 但它们对无感唤醒/探活和定位连接失败很关键，需要绑定到 trace。
     if (type === 'READ_WRITE_SVC' && cmdType && cmdType !== 'WRITE_SVC') {
+      if ((cmdType === 'CONN_DEV' || cmdType === 'DIS_CONN') && typeof errno === 'number') {
+        for (const trace of recent) {
+          const existingReply = trace.reply && typeof trace.reply === 'object' ? trace.reply as Record<string, unknown> : undefined;
+          const existingPayload = existingReply?.payload && typeof existingReply.payload === 'object'
+            ? existingReply.payload as Record<string, unknown>
+            : undefined;
+          const existingCmd = existingPayload?.cmd && typeof existingPayload.cmd === 'object'
+            ? existingPayload.cmd as Record<string, unknown>
+            : undefined;
+          const existingCmdType = typeof existingCmd?.type === 'string' ? existingCmd.type : undefined;
+          if (existingPayload?.type === 'READ_WRITE_SVC' && existingCmdType === 'WRITE_SVC') {
+            continue;
+          }
+          this.updateDownlinkTrace(trace.id, 'ap_reply_seen', {
+            reply: {
+              type,
+              cmdType,
+              labelId: replyLabelId,
+              queueId: Number.isFinite(queueId) ? queueId : undefined,
+              payload: parsed,
+            },
+          });
+        }
+      }
       return;
     }
 
@@ -1694,7 +1724,7 @@ export class ApWebsocketService {
         ? existingPayload.cmd as Record<string, unknown>
         : undefined;
       const existingCmdType = typeof existingCmd?.type === 'string' ? existingCmd.type : undefined;
-      if (type === 'AP_REPORT_STATUS' && existingType === 'READ_WRITE_SVC' && existingCmdType === 'WRITE_SVC') {
+      if (type === 'AP_REPORT_STATUS' && existingType === 'READ_WRITE_SVC' && existingCmdType) {
         continue;
       }
 

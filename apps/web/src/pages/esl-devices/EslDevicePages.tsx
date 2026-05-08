@@ -61,6 +61,16 @@ export const EslDeviceListPage = () => {
       message.success(tx('已提交设备刷新', 'Device refresh submitted'));
     },
   });
+  const silentWake = useMutation({
+    mutationFn: ({ id, apId }: { id: string; apId?: string }) => api.silentWakeDevice(id, { apId, waitMs: 8000 }),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.devices });
+      message.success(result.conclusion ?? tx('已提交无感唤醒', 'Silent wake submitted'));
+    },
+    onError: (error: any) => {
+      message.error(error?.userMessage ?? error?.message ?? tx('无感唤醒失败', 'Silent wake failed'));
+    },
+  });
   const unbind = useMutation({
     mutationFn: api.unbindDevice,
     onSuccess: () => {
@@ -111,6 +121,12 @@ export const EslDeviceListPage = () => {
                       {tx('编辑', 'Edit')}
                     </Button>
                     <Button onClick={() => refresh.mutate(row.id)} disabled={!isBound} loading={refresh.isPending && refresh.variables === row.id}>{tx('刷新', 'Refresh')}</Button>
+                    <Button
+                      onClick={() => silentWake.mutate({ id: row.id, apId: row.apId })}
+                      loading={silentWake.isPending && silentWake.variables?.id === row.id}
+                    >
+                      {tx('唤醒', 'Wake')}
+                    </Button>
                     {isBound ? (
                       <Button onClick={() => unbind.mutate(row.id)} loading={unbind.isPending && unbind.variables === row.id}>{tx('解绑', 'Unbind')}</Button>
                     ) : (
