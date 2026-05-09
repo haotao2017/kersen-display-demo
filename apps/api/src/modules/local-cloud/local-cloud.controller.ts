@@ -15,6 +15,7 @@ import { BaseStation, Label } from '../../shared/models';
 import { ApWebsocketService } from '../ap-websocket/ap-websocket.service';
 import { LabelRendererService } from '../labels/label-renderer.service';
 import { MqttService } from '../mqtt/mqtt.service';
+import { RefreshQueueService } from '../refresh-queue/refresh-queue.service';
 
 type Row = Record<string, unknown>;
 type LocalDevice = Row & {
@@ -88,7 +89,7 @@ type SilentWakeResult = {
 const now = () => new Date().toISOString();
 const id = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const uploadDir = join(process.cwd(), 'uploads');
+const getUploadDir = () => process.env.UPLOAD_DIR || join(process.cwd(), 'uploads');
 const SVG_FONT_STACK = 'Arial, Microsoft YaHei, sans-serif';
 const OFFLINE_AFTER_MS = Number(process.env.AP_OFFLINE_AFTER_SECONDS ?? 90) * 1000;
 
@@ -306,13 +307,21 @@ function resizeSchemaToCanvas(schema: Row, width: number, height: number, device
 
 @Controller('api/v1')
 export class LocalCloudController {
+  private readonly refreshWindowUntilByAp = new Map<string, number>();
+
   constructor(
     private readonly db: MemoryStore,
     private readonly jwt: JwtService,
     private readonly renderer: LabelRendererService,
     private readonly mqtt: MqttService,
     private readonly apWebsocket: ApWebsocketService,
-  ) {}
+    private readonly refreshQueue: RefreshQueueService,
+  ) {
+    this.refreshQueue.registerHandler(({ taskId }) => this.executeQueuedRefreshTask(taskId));
+    setTimeout(() => {
+      void this.recoverQueuedRefreshTasks();
+    }, 1000);
+  }
 
   @Post('auth/login')
   login(@Body() body: Row) {
@@ -835,8 +844,8 @@ export class LocalCloudController {
   @Post('tasks/batch-refresh')
   async batchRefresh(@Body() body: Row) {
     const ids = Array.isArray(body.deviceIds) ? body.deviceIds.map(String) : this.localDevices().map((item) => String(item.id));
-    await Promise.all(ids.map((deviceId) => this.createRefreshTask(deviceId, 'batch_refresh')));
-    return { ok: true };
+    const tasks = await this.createRefreshTasksQueued(ids, 'batch_refresh');
+    return { ok: true, createdTaskCount: tasks.length, taskIds: tasks.map((task) => String(task.id)) };
   }
 
   @Get('users')
@@ -891,10 +900,10 @@ export class LocalCloudController {
       throw new BadRequestException('only image uploads are supported');
     }
 
-    await fs.mkdir(uploadDir, { recursive: true });
+    await fs.mkdir(getUploadDir(), { recursive: true });
     const ext = imageExtension(file.mimetype, file.originalname);
     const filename = `${Date.now()}-${randomUUID()}${ext}`;
-    await fs.writeFile(join(uploadDir, filename), file.buffer);
+    await fs.writeFile(join(getUploadDir(), filename), file.buffer);
 
     return {
       url: `/api/v1/uploads/files/${filename}`,
@@ -910,7 +919,7 @@ export class LocalCloudController {
       throw new NotFoundException('File not found');
     }
     try {
-      const body = await fs.readFile(join(uploadDir, filename));
+      const body = await fs.readFile(join(getUploadDir(), filename));
       response.setHeader('Content-Type', imageContentType(filename));
       response.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       return new StreamableFile(body);
@@ -977,42 +986,144 @@ export class LocalCloudController {
 
   private async createRefreshTask(deviceId: string, taskType: string, parentTaskId?: string) {
     const label = this.findLabel(deviceId);
-    const render = await this.renderTemplateForLabel(label);
+    const apId = this.resolveDeliveryApId(label);
+    const timestamp = now();
+    if (!parentTaskId) {
+      this.supersedeQueuedRefreshTasks(label.id);
+    }
     const task = {
       id: id('task'),
       taskType,
       eslDeviceId: deviceId,
-      apId: label.apId,
+      apId,
       productId: (label as Label & Row).productId,
       templateId: (label as Label & Row).templateId,
       payload: { labelId: label.id, localRenderer: true },
-      renderResult: {
+      renderResult: {},
+      retryCount: parentTaskId ? 1 : 0,
+      status: 'queued',
+      parentTaskId,
+      triggeredAt: timestamp,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      eslDevice: this.localDevice(label, false),
+    } as Row;
+    this.db.cloudTasks.set(String(task.id), task);
+    this.db.save();
+    await this.enqueueRefreshTask(apId, String(task.id));
+    return task;
+  }
+
+  private async createRefreshTasksQueued(deviceIds: string[], taskType: string) {
+    const tasks: Row[] = [];
+    const batchSize = Math.max(1, Math.min(100, Number(process.env.ESL_TASK_CREATE_BATCH_SIZE ?? 50)));
+    for (let index = 0; index < deviceIds.length; index += batchSize) {
+      const batch = deviceIds.slice(index, index + batchSize);
+      for (const deviceId of batch) {
+        tasks.push(await this.createRefreshTask(deviceId, taskType));
+      }
+    }
+    return tasks;
+  }
+
+  private supersedeQueuedRefreshTasks(labelId: string) {
+    for (const task of this.db.cloudTasks.values()) {
+      if (
+        String(task.eslDeviceId ?? '') === labelId
+        && String(task.status ?? '') === 'queued'
+        && !task.parentTaskId
+      ) {
+        task.status = 'superseded';
+        task.resultMsg = '同一标签已有新的刷新任务，旧的未执行任务已自动合并为最后一次刷新';
+        task.updatedAt = now();
+      }
+    }
+  }
+
+  private async enqueueRefreshTask(apId: string | undefined, taskId: string) {
+    if (!apId) {
+      const task = this.db.cloudTasks.get(taskId);
+      if (task) {
+        task.status = 'failed';
+        task.resultMsg = '没有可用基站，刷新任务无法加入下发队列';
+        task.updatedAt = now();
+        this.db.cloudTasks.set(taskId, task);
+        this.db.save();
+      }
+      return;
+    }
+
+    await this.refreshQueue.add({ apId, taskId });
+  }
+
+  private async executeQueuedRefreshTask(taskId: string) {
+    const task = this.db.cloudTasks.get(taskId);
+    if (!task || String(task.status ?? '') !== 'queued') return;
+
+    const labelId = String(task.eslDeviceId ?? '');
+    const label = this.findLabel(labelId);
+    task.status = 'rendering';
+    task.resultMsg = '任务已进入 AP 下发队列，正在生成刷新图片';
+    task.updatedAt = now();
+    this.db.cloudTasks.set(taskId, task);
+    this.db.save();
+
+    try {
+      const render = await this.renderTemplateForLabel(label);
+      task.renderResult = {
         width: render.width,
         height: render.height,
         colorMode: render.colorMode,
         previewImageUrl: render.previewImageUrl,
-      },
-      retryCount: parentTaskId ? 1 : 0,
-      status: 'queued',
-      parentTaskId,
-      triggeredAt: now(),
-      createdAt: now(),
-      updatedAt: now(),
-      eslDevice: this.localDevice(label, false),
-    } as Row;
-    this.db.cloudTasks.set(String(task.id), task);
-    const delivery = await this.deliverRefreshTask(label, render, task.id);
-    task.status = delivery.ok ? 'sending' : 'failed';
-    task.resultMsg = delivery.reason;
-    task.delivery = delivery;
-    task.updatedAt = now();
-    if (delivery.commandId) {
-      task.payload = { ...(task.payload as Row), commandId: delivery.commandId };
+      };
+      const delivery = await this.deliverRefreshTask(label, render, task.id);
+      task.status = delivery.ok ? 'sending' : 'failed';
+      task.resultMsg = delivery.reason;
+      task.delivery = delivery;
+      task.updatedAt = now();
+      if (delivery.commandId) {
+        task.payload = { ...(task.payload as Row), commandId: delivery.commandId };
+      }
+      this.db.cloudTasks.set(taskId, task);
+      this.db.save();
+      this.scheduleRefreshRetry(label.id, taskId);
+    } catch (error) {
+      task.status = 'failed';
+      task.resultMsg = `刷新任务执行失败：${error instanceof Error ? error.message : String(error)}`;
+      task.updatedAt = now();
+      this.db.cloudTasks.set(taskId, task);
+      this.db.save();
     }
-    this.db.cloudTasks.set(String(task.id), task);
-    this.db.save();
-    this.scheduleRefreshRetry(label.id, String(task.id));
-    return task;
+  }
+
+  private async recoverQueuedRefreshTasks() {
+    const recoverableStatuses = new Set(['queued', 'rendering', 'sending', 'timeout']);
+    const tasks = [...this.db.cloudTasks.values()]
+      .filter((task) => recoverableStatuses.has(String(task.status ?? '')))
+      .sort((a, b) => String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
+
+    for (const task of tasks) {
+      const taskId = String(task.id ?? '');
+      const labelId = String(task.eslDeviceId ?? '');
+      const label = labelId ? this.db.labels.get(labelId) : undefined;
+      if (!taskId || !label) {
+        task.status = 'failed';
+        task.resultMsg = '服务重启恢复任务失败：标签不存在';
+        task.updatedAt = now();
+        continue;
+      }
+
+      task.status = 'queued';
+      task.resultMsg = '服务重启后已恢复到刷新队列';
+      task.updatedAt = now();
+      task.apId = this.resolveDeliveryApId(label);
+      this.db.cloudTasks.set(taskId, task);
+      await this.enqueueRefreshTask(String(task.apId || ''), taskId);
+    }
+
+    if (tasks.length > 0) {
+      this.db.save();
+    }
   }
 
   private resolveEffectiveTemplateForLabel(label: Label & Row) {
@@ -1030,7 +1141,7 @@ export class LocalCloudController {
       .map((label) => label as Label & Row)
       .filter((label) => String(label.productId ?? '') === productId);
     const refreshableLabels = labels.filter((label) => this.isRefreshableTemplate(this.resolveEffectiveTemplateForLabel(label)));
-    const tasks = await Promise.all(refreshableLabels.map((label) => this.createRefreshTask(label.id, taskType)));
+    const tasks = await this.createRefreshTasksQueued(refreshableLabels.map((label) => label.id), taskType);
     const taskIds = tasks.map((task) => String(task.id));
     const missingTemplateCount = labels.length - refreshableLabels.length;
     return {
@@ -1053,7 +1164,7 @@ export class LocalCloudController {
     const labels = [...this.db.labels.values()]
       .map((label) => label as Label & Row)
       .filter((label) => String(label.templateId ?? '') === templateId);
-    const tasks = await Promise.all(labels.map((label) => this.createRefreshTask(label.id, taskType)));
+    const tasks = await this.createRefreshTasksQueued(labels.map((label) => label.id), taskType);
     const taskIds = tasks.map((task) => String(task.id));
     return {
       attempted: true,
@@ -1851,7 +1962,7 @@ export class LocalCloudController {
         const uploadMatch = source.match(/\/api\/v1\/uploads\/files\/([^/?#]+)/);
         if (uploadMatch?.[1]) {
           const filename = decodeURIComponent(uploadMatch[1]);
-          body = await fs.readFile(join(uploadDir, filename));
+          body = await fs.readFile(join(getUploadDir(), filename));
           contentType = imageContentType(filename);
         } else {
           const url = source.startsWith('/')

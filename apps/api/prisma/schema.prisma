@@ -1,0 +1,173 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Store {
+  id           String   @id
+  code         String   @unique
+  name         String
+  username     String
+  passwordHash String
+  serverUrl    String?
+  mqttTcpPort  Int?
+  mqttWsPath   String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  baseStations BaseStation[]
+  labels       Label[]
+  products     Product[]
+  templates    Template[]
+  refreshTasks RefreshTask[]
+}
+
+model BaseStation {
+  id               String   @id
+  storeCode        String
+  name             String
+  mac              String?
+  ip               String?
+  firmware         String?
+  os               String?
+  hostAddr         String?
+  status           String
+  lastSeenAt       DateTime?
+  location         Json?
+  config           Json     @default("{}")
+  channels         Json?
+  metrics          Json     @default("{}")
+  discoveredLabels Json     @default("{}")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  store Store @relation(fields: [storeCode], references: [code], onDelete: Cascade)
+  labels Label[]
+  refreshTasks RefreshTask[]
+
+  @@index([storeCode])
+  @@index([status])
+}
+
+model Label {
+  id        String   @id
+  storeCode String
+  apId      String?
+  sku       String?
+  title     String
+  price     Decimal  @default(0)
+  currency  String   @default("CNY")
+  status    String
+  battery   Int?
+  rssi      Int?
+  services  Json?
+  productId String?
+  templateId String?
+  deviceType String?
+  screenWidth Int?
+  screenHeight Int?
+  updatedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  store Store @relation(fields: [storeCode], references: [code], onDelete: Cascade)
+  ap BaseStation? @relation(fields: [apId], references: [id], onDelete: SetNull)
+  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  template Template? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  refreshTasks RefreshTask[]
+
+  @@index([storeCode])
+  @@index([apId])
+  @@index([productId])
+  @@index([templateId])
+}
+
+model Product {
+  id                String   @id
+  storeCode         String
+  sku               String
+  barcode           String?
+  name              String
+  price             Decimal  @default(0)
+  originalPrice     Decimal?
+  memberPrice       Decimal?
+  promotionPrice    Decimal?
+  promotionText     String?
+  imageUrl          String?
+  customFields      Json     @default("{}")
+  defaultTemplateId String?
+  status            String   @default("active")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  store Store @relation(fields: [storeCode], references: [code], onDelete: Cascade)
+  defaultTemplate Template? @relation("ProductDefaultTemplate", fields: [defaultTemplateId], references: [id], onDelete: SetNull)
+  labels Label[]
+  refreshTasks RefreshTask[]
+
+  @@index([storeCode])
+  @@index([sku])
+}
+
+model Template {
+  id              String   @id
+  storeCode       String
+  code            String
+  name            String
+  deviceType      String
+  width           Int
+  height          Int
+  dpi             Int?
+  colorMode       String
+  status          String
+  version         Int      @default(1)
+  previewImageUrl String?
+  schema          Json     @default("{}")
+  recentVersions  Json     @default("[]")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  store Store @relation(fields: [storeCode], references: [code], onDelete: Cascade)
+  labels Label[]
+  productsUsingAsDefault Product[] @relation("ProductDefaultTemplate")
+  refreshTasks RefreshTask[]
+
+  @@unique([storeCode, code])
+  @@index([storeCode])
+  @@index([status])
+}
+
+model RefreshTask {
+  id           String   @id
+  storeCode    String
+  taskType     String
+  eslDeviceId  String
+  apId         String?
+  productId    String?
+  templateId   String?
+  payload      Json     @default("{}")
+  renderResult Json     @default("{}")
+  delivery     Json?
+  events       Json     @default("[]")
+  retryCount   Int      @default(0)
+  status       String
+  parentTaskId String?
+  childTaskId  String?
+  resultMsg    String?
+  triggeredAt  DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  store Store @relation(fields: [storeCode], references: [code], onDelete: Cascade)
+  label Label @relation(fields: [eslDeviceId], references: [id], onDelete: Cascade)
+  ap BaseStation? @relation(fields: [apId], references: [id], onDelete: SetNull)
+  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  template Template? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  @@index([storeCode])
+  @@index([apId, status, createdAt])
+  @@index([eslDeviceId, status, createdAt])
+  @@index([status, createdAt])
+}

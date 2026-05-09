@@ -7,8 +7,10 @@ import { AppModule } from './app.module';
 import { ApWebsocketService } from './modules/ap-websocket/ap-websocket.service';
 import { MqttService } from './modules/mqtt/mqtt.service';
 import { MemoryStore } from './shared/memory-store';
+import { validateProductionConfig } from './shared/production-config';
 
 loadEnvFiles();
+validateProductionConfig();
 
 function isLoopback(ip?: string) {
   return !ip || ip === '::1' || ip === '127.0.0.1' || ip === '::ffff:127.0.0.1';

@@ -1,0 +1,10 @@
+node_modules
+apps/api/dist
+apps/web/dist
+apps/api/data
+apps/api/uploads
+uploads
+.git
+.env
+*.log
+kersen_display_cloud_Test

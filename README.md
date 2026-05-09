@@ -22,6 +22,26 @@ npm run dev
 
 前端默认运行在 `http://localhost:5173`，后端默认运行在 `http://localhost:4000`。
 
+如需按生产形态本地测试 Postgres + Redis：
+
+```bash
+docker compose up -d postgres redis
+npm run prisma:generate -w apps/api
+npm run prisma:push -w apps/api
+npm run dev
+```
+
+如需直接用 Docker 跑完整前后端：
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+控制台访问 `http://localhost:8080`，API 访问 `http://localhost:4000`。API 容器启动时默认会执行 `prisma db push`，可通过 `PRISMA_DB_PUSH_ON_START=false` 关闭。
+
+`DATABASE_URL` 配好后，门店、基站、标签、商品、模板、刷新任务会同步到 Postgres；不配置时仍使用本地 `apps/api/data/store.json`。`REDIS_URL` 配好后刷新任务进入 Redis/BullMQ 队列；不配置时使用进程内队列。
+
 也可以分开启动，调试时推荐这种方式：
 
 ```bash
@@ -65,6 +85,20 @@ npm run dev -w apps/web
    - `image.height`
 
 目前外层命令仍是逆向占位格式 `LABEL_COMMAND`。真实屏幕刷新还需要继续确认基站固件接受的刷屏命令名、分片格式、压缩格式和 ACK 流程。
+
+## 刷新队列
+
+商品更新、模板发布、绑定刷新、手动刷新都会先创建刷新任务，再进入队列执行。队列按基站限流，默认每个基站最多同时放行 6 个刷新任务，并在每次下发后保持一个短暂窗口，避免连续任务把 AP 内部 50 条读写队列打满。
+
+关键环境变量：
+
+- `REDIS_URL`：启用 Redis 持久队列，AWS 可用 ElastiCache Redis。
+- `DATABASE_URL`：启用 Postgres 持久化，AWS 可用 RDS PostgreSQL。
+- `UPLOAD_DIR`：上传图片目录，容器部署时必须挂载持久卷；AWS 上建议挂 EFS 或后续切 S3。
+- `ESL_AP_REFRESH_CONCURRENCY=6`：单基站刷新并发上限。
+- `ESL_AP_REFRESH_SLOT_HOLD_MS=30000`：每个刷新槽位下发后默认保持 30 秒。
+- `ESL_REFRESH_WORKER_CONCURRENCY=12`：全局 worker 并发。
+- `ESL_TASK_CREATE_BATCH_SIZE=50`：批量创建任务时的分批大小。
 
 ## MQTT 桥接
 

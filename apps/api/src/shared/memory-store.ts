@@ -1,15 +1,19 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import * as bcrypt from 'bcryptjs';
 import { BaseStation, EslCommand, Label, OfficialDownlinkCapture, RequestLog, StoreConfig } from './models';
+import { PersistentStoreService } from './persistent-store.service';
 
 const now = () => new Date().toISOString();
 const id = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 
 @Injectable()
-export class MemoryStore {
+export class MemoryStore implements OnModuleInit {
   private readonly filePath = join(process.cwd(), 'data', 'store.json');
+  private saveTimer?: ReturnType<typeof setTimeout>;
+  private savingPersistent = false;
+  private pendingPersistentSave = false;
   readonly stores = new Map<string, StoreConfig>();
   readonly baseStations = new Map<string, BaseStation>();
   readonly labels = new Map<string, Label>();
@@ -22,7 +26,7 @@ export class MemoryStore {
   readonly apSessions = new Map<string, { storeCode: string; apId: string; createdAt: string; source: 'local' | 'official' }>();
   readonly latestApSessions = new Map<string, { token: string; storeCode: string; apId: string; createdAt: string; source: 'local' | 'official' }>();
 
-  constructor() {
+  constructor(private readonly persistentStore: PersistentStoreService) {
     if (this.load()) {
       return;
     }
@@ -70,6 +74,21 @@ export class MemoryStore {
     this.save();
   }
 
+  async onModuleInit() {
+    const snapshot = await this.persistentStore.load();
+    if (!snapshot) {
+      return;
+    }
+
+    if (snapshot.stores.length > 0) {
+      this.replaceFromSnapshot(snapshot);
+      this.saveJson();
+      return;
+    }
+
+    this.queuePersistentSave();
+  }
+
   createCommand(input: Omit<EslCommand, 'id' | 'status' | 'createdAt'>) {
     const command: EslCommand = {
       ...input,
@@ -101,6 +120,11 @@ export class MemoryStore {
   }
 
   save() {
+    this.saveJson();
+    this.queuePersistentSave();
+  }
+
+  private saveJson() {
     mkdirSync(dirname(this.filePath), { recursive: true });
     writeFileSync(
       this.filePath,
@@ -120,6 +144,38 @@ export class MemoryStore {
         2,
       ),
     );
+  }
+
+  private queuePersistentSave() {
+    if (!this.persistentStore.enabled) return;
+    this.pendingPersistentSave = true;
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined;
+      void this.flushPersistentSave();
+    }, 500);
+  }
+
+  private async flushPersistentSave() {
+    if (!this.pendingPersistentSave || this.savingPersistent) return;
+
+    this.pendingPersistentSave = false;
+    this.savingPersistent = true;
+    try {
+      await this.persistentStore.saveSnapshot({
+        stores: [...this.stores.values()],
+        baseStations: [...this.baseStations.values()],
+        labels: [...this.labels.values()],
+        cloudProducts: [...this.cloudProducts.values()],
+        cloudTemplates: [...this.cloudTemplates.values()],
+        cloudTasks: [...this.cloudTasks.values()],
+      });
+    } finally {
+      this.savingPersistent = false;
+      if (this.pendingPersistentSave) {
+        this.queuePersistentSave();
+      }
+    }
   }
 
   private load() {
@@ -158,5 +214,37 @@ export class MemoryStore {
     this.requestLogs.push(...(data.requestLogs ?? []));
     this.officialDownlinkCaptures.push(...(data.officialDownlinkCaptures ?? []));
     return true;
+  }
+
+  private replaceFromSnapshot(data: {
+    stores?: StoreConfig[];
+    baseStations?: BaseStation[];
+    labels?: Label[];
+    commands?: EslCommand[];
+    cloudProducts?: Array<Record<string, unknown>>;
+    cloudTemplates?: Array<Record<string, unknown>>;
+    cloudTasks?: Array<Record<string, unknown>>;
+    requestLogs?: RequestLog[];
+    officialDownlinkCaptures?: OfficialDownlinkCapture[];
+  }) {
+    this.stores.clear();
+    this.baseStations.clear();
+    this.labels.clear();
+    this.commands.clear();
+    this.cloudProducts.clear();
+    this.cloudTemplates.clear();
+    this.cloudTasks.clear();
+    this.requestLogs.splice(0);
+    this.officialDownlinkCaptures.splice(0);
+
+    data.stores?.forEach((item) => this.stores.set(item.code, item));
+    data.baseStations?.forEach((item) => this.baseStations.set(item.id, item));
+    data.labels?.forEach((item) => this.labels.set(item.id, item));
+    data.commands?.forEach((item) => this.commands.set(item.id, item));
+    data.cloudProducts?.forEach((item) => this.cloudProducts.set(String(item.id), item));
+    data.cloudTemplates?.forEach((item) => this.cloudTemplates.set(String(item.id), item));
+    data.cloudTasks?.forEach((item) => this.cloudTasks.set(String(item.id), item));
+    this.requestLogs.push(...(data.requestLogs ?? []));
+    this.officialDownlinkCaptures.push(...(data.officialDownlinkCaptures ?? []));
   }
 }

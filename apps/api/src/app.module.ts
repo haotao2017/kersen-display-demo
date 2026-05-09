@@ -10,6 +10,7 @@ import { DeviceLogsModule } from './modules/device-logs/device-logs.module';
 import { ApWebsocketModule } from './modules/ap-websocket/ap-websocket.module';
 import { SharedModule } from './shared/shared.module';
 import { LocalCloudModule } from './modules/local-cloud/local-cloud.module';
+import { RefreshQueueModule } from './modules/refresh-queue/refresh-queue.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { LocalCloudModule } from './modules/local-cloud/local-cloud.module';
       signOptions: { expiresIn: '8h' },
     }),
     SharedModule,
+    RefreshQueueModule,
     AuthModule,
     StoresModule,
     LocalCloudModule,

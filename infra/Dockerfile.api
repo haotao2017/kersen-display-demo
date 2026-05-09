@@ -8,14 +8,19 @@ RUN npm install
 FROM deps AS build
 WORKDIR /app
 COPY . .
+RUN npm run prisma:generate -w apps/api
 RUN npm run build -w apps/api
 
 FROM node:22-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
-COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/apps/api/node_modules ./apps/api/node_modules
+COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/apps/api/dist ./apps/api/dist
+COPY --from=build /app/apps/api/prisma ./apps/api/prisma
+COPY --from=build /app/prisma.config.ts ./prisma.config.ts
+COPY infra/start-api.sh ./infra/start-api.sh
 COPY apps/api/package.json ./apps/api/package.json
+RUN chmod +x ./infra/start-api.sh && mkdir -p /app/uploads /app/apps/api/data
+VOLUME ["/app/uploads", "/app/apps/api/data"]
 EXPOSE 4000 1883
-CMD ["npm", "run", "start:prod", "-w", "apps/api"]
+CMD ["./infra/start-api.sh"]
