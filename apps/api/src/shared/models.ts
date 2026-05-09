@@ -22,9 +22,20 @@ export interface BaseStation {
   mac?: string;
   ip?: string;
   firmware?: string;
+  location?: unknown;
+  config?: Record<string, unknown>;
   os?: string;
   hostAddr?: string;
   channels?: Array<Record<string, unknown>>;
+  discoveredLabels?: Record<string, {
+    eslCode: string;
+    status: 'online' | 'offline' | 'warning';
+    battery?: number | null;
+    signal?: number | null;
+    lastSeenAt?: string;
+    source?: string;
+    services?: Record<string, unknown>;
+  }>;
   status: BaseStationStatus;
   lastSeenAt?: string;
   metrics: {

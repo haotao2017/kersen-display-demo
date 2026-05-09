@@ -145,7 +145,9 @@ export interface Ap {
   mac?: string;
   firmwareVersion?: string;
   location?: string;
-  config: Record<string, unknown>;
+  config: Record<string, unknown> & {
+    autoImportScannedLabels?: boolean;
+  };
   status: 'online' | 'offline';
   lastOnlineAt?: string;
   lastHeartbeatAt?: string;

@@ -1,4 +1,4 @@
-import { App, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Popconfirm, Select, Space, Table, Tag, Typography } from 'antd';
+import { App, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Popconfirm, Select, Space, Switch, Table, Tag, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -10,7 +10,7 @@ import { queryKeys } from '../../utils/constants';
 
 export const ApListPage = () => {
   const { tx } = useI18n();
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [form] = Form.useForm();
@@ -27,6 +27,30 @@ export const ApListPage = () => {
     },
     onError: (error: any) => message.error(error?.response?.data?.message ?? tx('保存基站失败', 'Failed to save station')),
   });
+  const updateAutoImport = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) => api.updateApAutoImportScannedLabels(id, enabled),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.aps });
+      queryClient.invalidateQueries({ queryKey: queryKeys.devices });
+      queryClient.invalidateQueries({ predicate: (query) => Array.isArray(query.queryKey) && query.queryKey[0] === 'ap' });
+      message.success(tx('自动扫描入库设置已更新', 'Auto import setting updated'));
+    },
+    onError: (error: any) => message.error(error?.response?.data?.message ?? tx('更新自动扫描入库设置失败', 'Failed to update auto import setting')),
+  });
+
+  const confirmEnableAutoImport = (row: any) => {
+    modal.confirm({
+      title: tx('开启基站自动扫描入库？', 'Enable automatic scan import?'),
+      content: tx(
+        `开启后，基站 ${row.apCode ?? row.id} 上报 DEVICE_RETRIEVE / SLAVE_ADV_SVC 扫描结果时，系统会自动把新发现的标签写入 ESL 设备列表，并绑定到这个基站；已存在的标签会更新在线状态、信号和服务信息。关闭时仍会保留扫描发现记录，但不会自动新增或绑定正式标签设备。请确认该基站所在区域的标签都属于当前门店，避免误把其他区域标签入库。`,
+        `After enabling, when station ${row.apCode ?? row.id} reports DEVICE_RETRIEVE / SLAVE_ADV_SVC scan results, newly discovered labels will be added to the ESL device list and bound to this station automatically. Existing labels will have online state, signal, and service data updated. When disabled, scan results are still kept as discovered records, but formal label devices are not created or bound automatically. Confirm the labels around this station belong to this store to avoid importing unrelated labels.`,
+      ),
+      okText: tx('确认开启', 'Enable'),
+      cancelText: tx('取消', 'Cancel'),
+      width: 620,
+      onOk: () => updateAutoImport.mutateAsync({ id: row.id, enabled: true }),
+    });
+  };
 
   return (
     <Space direction="vertical" style={{ width: '100%' }} size={16}>
@@ -63,6 +87,19 @@ export const ApListPage = () => {
               render: (_, row: any) => (
                 <Space>
                   <Button onClick={() => navigate(`/aps/${row.id}`)}>{tx('查看', 'View')}</Button>
+                  <Switch
+                    checked={row.config?.autoImportScannedLabels === true}
+                    checkedChildren={tx('入库开', 'Import on')}
+                    unCheckedChildren={tx('入库关', 'Import off')}
+                    loading={updateAutoImport.isPending && updateAutoImport.variables?.id === row.id}
+                    onChange={(checked) => {
+                      if (checked) {
+                        confirmEnableAutoImport(row);
+                        return;
+                      }
+                      updateAutoImport.mutate({ id: row.id, enabled: false });
+                    }}
+                  />
                 </Space>
               ),
             },

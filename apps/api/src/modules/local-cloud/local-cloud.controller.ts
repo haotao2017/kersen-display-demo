@@ -705,7 +705,11 @@ export class LocalCloudController {
       status: 'offline',
       metrics: {},
       location: body.location,
-      config: body.config ?? {},
+      config: {
+        ...(body.config && typeof body.config === 'object' ? body.config as Row : {}),
+        autoImportScannedLabels: false,
+      },
+      discoveredLabels: {},
     };
     this.db.baseStations.set(ap.id, ap);
     this.db.save();
@@ -725,7 +729,24 @@ export class LocalCloudController {
     ap.mac = stringValue(body.mac) || ap.mac;
     ap.firmware = stringValue(body.firmwareVersion) || ap.firmware;
     ap.location = body.location ?? ap.location;
-    ap.config = body.config ?? ap.config ?? {};
+    ap.config = {
+      ...(ap.config ?? {}),
+      ...(body.config && typeof body.config === 'object' ? body.config as Row : {}),
+      autoImportScannedLabels: (ap.config as Row | undefined)?.autoImportScannedLabels === true,
+    };
+    this.db.save();
+    return this.localAp(ap);
+  }
+
+  @Put('aps/:apId/auto-import-scanned-labels')
+  updateApAutoImportScannedLabels(@Param('apId') apId: string, @Body() body: Row) {
+    const ap = this.findAp(apId) as BaseStation & Row;
+    const enabled = readBool(body.enabled, false);
+    ap.config = {
+      ...(ap.config && typeof ap.config === 'object' ? ap.config as Row : {}),
+      autoImportScannedLabels: enabled,
+    };
+    this.db.baseStations.set(ap.id, ap);
     this.db.save();
     return this.localAp(ap);
   }
@@ -745,7 +766,11 @@ export class LocalCloudController {
   @Post('aps/:apId/config')
   configAp(@Param('apId') apId: string, @Body() body: Row) {
     const ap = this.findAp(apId) as BaseStation & Row;
-    ap.config = body.config ?? {};
+    const currentConfig = ap.config && typeof ap.config === 'object' ? ap.config as Row : {};
+    ap.config = {
+      ...(body.config && typeof body.config === 'object' ? body.config as Row : {}),
+      autoImportScannedLabels: currentConfig.autoImportScannedLabels === true,
+    };
     this.db.save();
     return this.localAp(ap);
   }
@@ -986,6 +1011,7 @@ export class LocalCloudController {
     }
     this.db.cloudTasks.set(String(task.id), task);
     this.db.save();
+    this.scheduleRefreshRetry(label.id, String(task.id));
     return task;
   }
 
@@ -1050,12 +1076,19 @@ export class LocalCloudController {
     }
 
     const packet = await this.buildLocalReadWritePacket(label.storeCode, apId, label.id, render);
+    const preflight = await this.prepareRefreshWindow(label.storeCode, apId);
     const command = this.db.createCommand({
       storeCode: label.storeCode,
       targetType: 'label',
       targetId: label.id,
       type: 'refresh_label',
-      payload: { source: 'api/v1', taskId, render: { width: render.width, height: render.height }, localProtocol: packet.renderMode },
+      payload: {
+        source: 'api/v1',
+        taskId,
+        render: { width: render.width, height: render.height },
+        localProtocol: packet.renderMode,
+        preflight,
+      },
     });
 
     const wsResult = this.apWebsocket.sendRaw(apId, packet.command);
@@ -1084,26 +1117,28 @@ export class LocalCloudController {
         fit: packet.fit,
         resample: packet.resample,
         dither: packet.dither,
+        preflight,
       },
     });
 
     const mqttOk = mqttResults.some((item) => item.ok);
     command.status = wsResult.ok || mqttOk ? 'sent' : 'failed';
     command.sentAt = new Date().toISOString();
-    command.payload = { ...command.payload, mqttResults };
+    command.payload = { ...command.payload, mqttResults, preflight };
     this.db.commands.set(command.id, command);
 
     return {
       ok: wsResult.ok || mqttOk,
       reason: wsResult.ok
-        ? `已下发（待执行确认），tracking=${wsResult.trackingId}，参数：${packet.renderMode} / ${packet.resample} / dither=${packet.dither}`
+        ? `已打开快速监听窗口并下发（待执行确认），tracking=${wsResult.trackingId}，参数：${packet.renderMode} / ${packet.resample} / dither=${packet.dither}`
         : mqttOk
-          ? `刷新任务已提交到本地 MQTT；当前没有可用 WebSocket 连接。参数：${packet.renderMode} / ${packet.resample} / dither=${packet.dither}`
+          ? `刷新任务已提交到本地 MQTT，并已尝试打开快速监听窗口；当前没有可用 WebSocket 连接。参数：${packet.renderMode} / ${packet.resample} / dither=${packet.dither}`
           : `刷新任务下发失败：WebSocket 不可用，MQTT 发布失败（${mqttResults.find((item) => !item.ok)?.reason ?? 'unknown'}）。`,
       commandId: command.id,
       transport: wsResult.ok ? 'websocket-read-write-svc+mqtt' : mqttOk ? 'mqtt' : 'none',
       websocket: wsResult,
       mqtt: mqttResults,
+      preflight,
       protocol: {
         topic: packet.topic,
         payloadBytes: packet.payloadBytes,
@@ -1112,6 +1147,69 @@ export class LocalCloudController {
         renderMode: packet.renderMode,
       },
     };
+  }
+
+  private async prepareRefreshWindow(storeCode: string, apId: string) {
+    const enabled = readBool(process.env.ESL_REFRESH_PRE_WAKE, true);
+    if (!enabled) {
+      return { enabled: false, reason: 'ESL_REFRESH_PRE_WAKE=false' };
+    }
+
+    const sendMqtt = readBool(process.env.ESL_REFRESH_PRE_WAKE_MQTT, true);
+    const sendWs = readBool(process.env.ESL_REFRESH_PRE_WAKE_WS, true);
+    const psmDurationMs = Math.max(3000, Math.min(60000, Number(process.env.ESL_REFRESH_PSM_DURATION_MS ?? 12000)));
+    const svcCfg = await this.dispatchSilentWakeCommand(apId, storeCode, this.buildSilentServiceConfigCommand(), { sendMqtt, sendWs });
+    await wait(Number(process.env.ESL_REFRESH_PRE_WAKE_DELAY_MS ?? 300));
+    const psm = await this.dispatchSilentWakeCommand(apId, storeCode, this.buildSilentPsmCommand(psmDurationMs), { sendMqtt, sendWs });
+    await wait(Number(process.env.ESL_REFRESH_PRE_WRITE_DELAY_MS ?? 500));
+    return {
+      enabled: true,
+      psmDurationMs,
+      serviceConfig: svcCfg,
+      psm,
+    };
+  }
+
+  private scheduleRefreshRetry(labelId: string, taskId: string) {
+    const retryEnabled = readBool(process.env.ESL_REFRESH_AUTO_RETRY, true);
+    if (!retryEnabled) return;
+
+    const delayMs = Math.max(5000, Math.min(60000, Number(process.env.ESL_REFRESH_RETRY_DELAY_MS ?? 25000)));
+    setTimeout(() => {
+      void this.retryRefreshIfNeeded(labelId, taskId).catch((error) => {
+        this.db.recordRequest({
+          method: 'LOCAL-IMAGE-RETRY',
+          path: `/labels/${labelId}`,
+          statusCode: 500,
+          body: { labelId, taskId, error: error instanceof Error ? error.message : String(error) },
+        });
+      });
+    }, delayMs);
+  }
+
+  private async retryRefreshIfNeeded(labelId: string, taskId: string) {
+    const task = this.db.cloudTasks.get(taskId);
+    if (!task || task.parentTaskId) return;
+    const status = String(task.status ?? '');
+    if (status === 'success') return;
+
+    const retryCount = numberValue(task.retryCount, 0);
+    const maxRetries = Math.max(0, Math.min(3, Number(process.env.ESL_REFRESH_AUTO_RETRY_MAX ?? 1)));
+    if (retryCount >= maxRetries) return;
+
+    const retryableStatuses = new Set(['queued', 'sending', 'failed', 'timeout']);
+    if (!retryableStatuses.has(status)) return;
+
+    const label = this.db.labels.get(labelId);
+    if (!label) return;
+
+    const retry = await this.createRefreshTask(labelId, 'auto_retry_after_wake', taskId);
+    task.retryCount = retryCount + 1;
+    task.childTaskId = retry.id;
+    task.resultMsg = `${stringValue(task.resultMsg, '刷新未确认成功')}；已自动打开监听窗口并补发一次刷新任务 ${retry.id}`;
+    task.updatedAt = now();
+    this.db.cloudTasks.set(taskId, task);
+    this.db.save();
   }
 
   private async runSilentWake(
@@ -1194,15 +1292,27 @@ export class LocalCloudController {
     command: Row,
     options: { sendMqtt: boolean; sendWs: boolean },
   ) {
-    const topic = `${storeCode}/${apId}/cmd`;
+    const normalizedAp = apId.trim();
+    const apUpper = normalizedAp.toUpperCase();
+    const apNoColonUpper = normalizedAp.replace(/:/g, '').toUpperCase();
+    const apNoColonLower = normalizedAp.replace(/:/g, '').toLowerCase();
+    const topics = [...new Set([
+      `${storeCode}/${normalizedAp}/cmd`,
+      `${storeCode}/${apUpper}/cmd`,
+      `${storeCode}/${apNoColonUpper}/cmd`,
+      `${storeCode}/${apNoColonLower}/cmd`,
+    ])];
     let mqtt: Row = { ok: false, skipped: true };
     if (options.sendMqtt) {
-      try {
-        await this.mqtt.publishJson(topic, command, { retain: false });
-        mqtt = { ok: true, topic };
-      } catch (error) {
-        mqtt = { ok: false, topic, reason: error instanceof Error ? error.message : String(error) };
-      }
+      const results = await Promise.all(topics.map(async (topic) => {
+        try {
+          await this.mqtt.publishJson(topic, command, { retain: false });
+          return { ok: true, topic };
+        } catch (error) {
+          return { ok: false, topic, reason: error instanceof Error ? error.message : String(error) };
+        }
+      }));
+      mqtt = { ok: results.some((item) => item.ok), topics: results };
     }
     const websocket = options.sendWs ? this.apWebsocket.sendRaw(apId, command) : { ok: false, skipped: true };
     return { mqtt, websocket };
@@ -1640,7 +1750,7 @@ export class LocalCloudController {
     const boundText = bindingField ? stringValue(bindings[bindingKey] ?? bindings[bindingField]) : '';
     if (type === 'image') {
       const href = bindingKey === 'imageUrl' && bindings.imageUrl ? bindings.imageUrl : stringValue(item.expression);
-      const resolvedHref = await this.resolveImageDataUri(href);
+      const resolvedHref = await this.resolveImageDataUri(href, width, height);
       return resolvedHref ? `<image href="${escapeXml(resolvedHref)}" x="${x}" y="${y}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid slice"/>` : `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${escapeXml(style.background ?? '#ffffff')}"/>`;
     }
     if (type === 'rect') {
@@ -1725,28 +1835,47 @@ export class LocalCloudController {
     });
   }
 
-  private async resolveImageDataUri(value: string) {
+  private async resolveImageDataUri(value: string, width?: number, height?: number) {
     const source = stringValue(value);
     if (!source) return '';
-    if (source.startsWith('data:image/')) return source;
 
     try {
       let body: Buffer;
       let contentType = 'image/png';
-      const uploadMatch = source.match(/\/api\/v1\/uploads\/files\/([^/?#]+)/);
-      if (uploadMatch?.[1]) {
-        const filename = decodeURIComponent(uploadMatch[1]);
-        body = await fs.readFile(join(uploadDir, filename));
-        contentType = imageContentType(filename);
+      if (source.startsWith('data:image/')) {
+        const match = source.match(/^data:([^;,]+);base64,(.+)$/);
+        if (!match) return source.length > 1_000_000 ? '' : source;
+        contentType = match[1] || 'image/png';
+        body = Buffer.from(match[2], 'base64');
       } else {
-        const url = source.startsWith('/')
-          ? new URL(source, process.env.PUBLIC_SERVER_URL ?? 'http://localhost:4000').toString()
-          : source;
-        const response = await fetch(url);
-        if (!response.ok) return '';
-        const arrayBuffer = await response.arrayBuffer();
-        body = Buffer.from(arrayBuffer);
-        contentType = response.headers.get('content-type')?.split(';')[0] || imageContentType(url);
+        const uploadMatch = source.match(/\/api\/v1\/uploads\/files\/([^/?#]+)/);
+        if (uploadMatch?.[1]) {
+          const filename = decodeURIComponent(uploadMatch[1]);
+          body = await fs.readFile(join(uploadDir, filename));
+          contentType = imageContentType(filename);
+        } else {
+          const url = source.startsWith('/')
+            ? new URL(source, process.env.PUBLIC_SERVER_URL ?? 'http://localhost:4000').toString()
+            : source;
+          const response = await fetch(url);
+          if (!response.ok) return '';
+          const arrayBuffer = await response.arrayBuffer();
+          body = Buffer.from(arrayBuffer);
+          contentType = response.headers.get('content-type')?.split(';')[0] || imageContentType(url);
+        }
+      }
+
+      const requestedWidth = numberValue(width, 0);
+      const requestedHeight = numberValue(height, 0);
+      const targetWidth = requestedWidth > 0 ? Math.max(1, Math.min(2000, Math.ceil(requestedWidth))) : 0;
+      const targetHeight = requestedHeight > 0 ? Math.max(1, Math.min(2000, Math.ceil(requestedHeight))) : 0;
+      if (targetWidth > 0 && targetHeight > 0 && body.length > 128 * 1024) {
+        body = await sharp(body, { animated: false })
+          .rotate()
+          .resize(targetWidth, targetHeight, { fit: 'cover', kernel: 'linear' })
+          .png({ compressionLevel: 9, adaptiveFiltering: true })
+          .toBuffer();
+        contentType = 'image/png';
       }
       return `data:${contentType};base64,${body.toString('base64')}`;
     } catch {
@@ -1951,8 +2080,18 @@ export class LocalCloudController {
     const devices = [...this.db.labels.values()]
       .filter((label) => label.apId === ap.id)
       .map((label) => this.localDevice(label, false));
+    const discoveredLabels = ap.discoveredLabels ?? {};
+    const discoveredDevices = Object.values(discoveredLabels).map((item) => ({
+      eslCode: item.eslCode,
+      status: item.status,
+      battery: item.battery,
+      signal: item.signal,
+      lastSeenAt: item.lastSeenAt,
+      source: item.source,
+    }));
     const latestHeartbeat = ap.lastSeenAt ?? now();
     const online = ap.status === 'online' && isRecentActivity(ap.lastSeenAt);
+    const config = row.config && typeof row.config === 'object' ? row.config as Row : {};
     return {
       id: ap.id,
       apCode: ap.id,
@@ -1961,24 +2100,20 @@ export class LocalCloudController {
       mac: ap.mac,
       firmwareVersion: ap.firmware,
       location: row.location,
-      config: row.config ?? {},
+      config: {
+        ...config,
+        autoImportScannedLabels: config.autoImportScannedLabels === true,
+      },
       status: online ? 'online' : 'offline',
       online,
       lastOnlineAt: ap.lastSeenAt,
       lastHeartbeatAt: latestHeartbeat,
       heartbeatIntervalSeconds: Number(process.env.AP_OFFLINE_AFTER_SECONDS ?? 90),
       deviceCount: devices.length,
-      discoveredDeviceCount: devices.length,
+      discoveredDeviceCount: discoveredDevices.length,
       devices,
       boundDevices: devices.filter((item) => item.bindStatus === 'bound'),
-      discoveredDevices: devices.map((item) => ({
-        eslCode: item.eslCode,
-        status: item.status,
-        battery: item.battery,
-        signal: item.signal,
-        lastSeenAt: item.updatedAt,
-        source: 'local',
-      })),
+      discoveredDevices,
       recentHeartbeats: [{
         id: `${ap.id}-latest`,
         createdAt: latestHeartbeat,

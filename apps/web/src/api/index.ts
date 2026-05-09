@@ -62,6 +62,7 @@ export const api = {
   ap: (id: string) => http.get<Ap>(`/aps/${id}`),
   createAp: (payload: Partial<Ap>) => http.post<Ap>('/aps', payload),
   updateAp: (id: string, payload: Partial<Ap>) => http.put<Ap>(`/aps/${id}`, payload),
+  updateApAutoImportScannedLabels: (id: string, enabled: boolean) => http.put<Ap>(`/aps/${id}/auto-import-scanned-labels`, { enabled }),
   searchApDevices: (id: string) => http.post<{ ok: boolean; devices?: EslDevice[] }>(`/aps/${id}/search-devices`, { timeoutSeconds: 10 }),
   syncApStatus: (id: string) => http.post<{ ok: boolean; status?: string }>(`/aps/${id}/sync-status`),
   configAp: (id: string, config: Record<string, unknown>) => http.post<Ap>(`/aps/${id}/config`, { config }),

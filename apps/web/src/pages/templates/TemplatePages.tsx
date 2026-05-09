@@ -164,6 +164,21 @@ const hasUsableFullBleedBackground = (schema?: TemplateSchema | null) => {
   ));
 };
 
+const getTemplateBackgroundImageUrl = (schema?: TemplateSchema | null) => {
+  const meta = schema?.meta;
+  const canvasWidth = Number(meta?.width ?? 0);
+  const canvasHeight = Number(meta?.height ?? 0);
+  if (!canvasWidth || !canvasHeight) return '';
+
+  const background = [...(schema?.elements ?? [])].reverse().find((element) => (
+    element.visible !== false
+    && isBackgroundImageElement(element, { width: canvasWidth, height: canvasHeight })
+    && typeof element.expression === 'string'
+    && element.expression.trim().length > 0
+  ));
+  return String(background?.expression ?? '').trim();
+};
+
 const TemplatePreviewThumbnail = ({
   previewImageUrl,
   name,
@@ -175,8 +190,15 @@ const TemplatePreviewThumbnail = ({
 }) => {
   const frameWidth = 96;
   const frameHeight = 64;
+  const [previewFailed, setPreviewFailed] = useState(false);
+  const backgroundImageUrl = getTemplateBackgroundImageUrl(schema);
+  const displayImageUrl = previewFailed && backgroundImageUrl ? backgroundImageUrl : previewImageUrl;
 
-  if (!previewImageUrl) {
+  useEffect(() => {
+    setPreviewFailed(false);
+  }, [previewImageUrl, backgroundImageUrl]);
+
+  if (!displayImageUrl) {
     return (
       <div
         style={{
@@ -209,8 +231,9 @@ const TemplatePreviewThumbnail = ({
       }}
     >
       <img
-        src={resolveDesignerAssetUrl(previewImageUrl)}
+        src={resolveDesignerAssetUrl(displayImageUrl)}
         alt={name}
+        onError={() => setPreviewFailed(true)}
         style={{
           width: '100%',
           height: '100%',

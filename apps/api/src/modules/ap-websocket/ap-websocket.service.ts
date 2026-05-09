@@ -107,6 +107,11 @@ function offlineAfterMs() {
   return Number(process.env.AP_OFFLINE_AFTER_SECONDS ?? 90) * 1000;
 }
 
+function apAutoImportEnabled(ap?: BaseStation) {
+  const config = ap?.config && typeof ap.config === 'object' ? ap.config as Record<string, unknown> : {};
+  return config.autoImportScannedLabels === true;
+}
+
 function summarizeOutboundText(text: string) {
   try {
     const parsed = JSON.parse(text) as Record<string, unknown>;
@@ -1872,6 +1877,9 @@ export class ApWebsocketService {
       os: message.os,
       hostAddr: message.host_addr,
       channels: current?.channels,
+      location: current?.location,
+      config: current?.config ?? {},
+      discoveredLabels: current?.discoveredLabels ?? {},
       status: 'online',
       lastSeenAt: new Date().toISOString(),
       metrics: current?.metrics ?? {},
@@ -1904,8 +1912,10 @@ export class ApWebsocketService {
     const apId = ap?.id;
     const storeCode = ap?.storeCode ?? process.env.UPSTREAM_STORE_CODE ?? '20248517';
     const seenLabelIds = new Set(entries.map(([labelId]) => labelId));
+    const shouldAutoImport = apAutoImportEnabled(ap);
+    const discoveredLabels = { ...(ap?.discoveredLabels ?? {}) };
 
-    if (apId) {
+    if (apId && shouldAutoImport) {
       for (const label of this.db.labels.values()) {
         if (label.apId === apId && !seenLabelIds.has(label.id)) {
           this.db.labels.set(label.id, {
@@ -1918,6 +1928,19 @@ export class ApWebsocketService {
     }
 
     for (const [labelId, payload] of entries) {
+      const lastSeenAt = new Date().toISOString();
+      discoveredLabels[labelId] = {
+        eslCode: labelId,
+        status: 'online',
+        signal: averageRssi(payload.master_rx_rssi),
+        lastSeenAt,
+        source: 'DEVICE_RETRIEVE',
+        services: payload.service_list,
+      };
+      if (!shouldAutoImport) {
+        continue;
+      }
+
       const current = this.db.labels.get(labelId);
       const currentRow = (current ?? {}) as Label & Record<string, unknown>;
       const label: Label & Record<string, unknown> = {
@@ -1933,7 +1956,7 @@ export class ApWebsocketService {
         battery: current?.battery,
         rssi: averageRssi(payload.master_rx_rssi),
         services: payload.service_list,
-        updatedAt: new Date().toISOString(),
+        updatedAt: lastSeenAt,
       };
       this.db.labels.set(label.id, label);
     }
@@ -1947,6 +1970,7 @@ export class ApWebsocketService {
           labelsOnline: entries.length,
           labelsTotal: entries.length,
         },
+        discoveredLabels,
       });
     }
 
@@ -1964,30 +1988,43 @@ export class ApWebsocketService {
     const current = this.db.labels.get(labelId);
     const currentRow = (current ?? {}) as Label & Record<string, unknown>;
     const services = Object.fromEntries((message.service_list ?? []).map((item) => [item.service ?? 'unknown', item.b64dat ?? '']));
-    this.db.labels.set(labelId, {
-      ...currentRow,
-      id: labelId,
-      storeCode: current?.storeCode ?? ap?.storeCode ?? process.env.UPSTREAM_STORE_CODE ?? '20248517',
-      apId: ap?.id ?? current?.apId,
-      sku: current?.sku ?? labelId,
-      title: current?.title ?? `ESL ${labelId}`,
-      price: current?.price ?? 0,
-      currency: current?.currency ?? 'CNY',
-      status: 'online',
-      battery: current?.battery,
-      rssi: message.master_rx_rssi,
-      services: { ...(current?.services ?? {}), ...services },
-      updatedAt: new Date().toISOString(),
-    });
+    const lastSeenAt = new Date().toISOString();
+    if (apAutoImportEnabled(ap)) {
+      this.db.labels.set(labelId, {
+        ...currentRow,
+        id: labelId,
+        storeCode: current?.storeCode ?? ap?.storeCode ?? process.env.UPSTREAM_STORE_CODE ?? '20248517',
+        apId: ap?.id ?? current?.apId,
+        sku: current?.sku ?? labelId,
+        title: current?.title ?? `ESL ${labelId}`,
+        price: current?.price ?? 0,
+        currency: current?.currency ?? 'CNY',
+        status: 'online',
+        battery: current?.battery,
+        rssi: message.master_rx_rssi,
+        services: { ...(current?.services ?? {}), ...services },
+        updatedAt: lastSeenAt,
+      });
+    }
 
     if (ap) {
+      const discoveredLabels = { ...(ap.discoveredLabels ?? {}) };
+      discoveredLabels[labelId] = {
+        eslCode: labelId,
+        status: 'online',
+        signal: message.master_rx_rssi,
+        lastSeenAt,
+        source: 'SLAVE_ADV_SVC',
+        services: { ...(discoveredLabels[labelId]?.services ?? {}), ...services },
+      };
       this.db.baseStations.set(ap.id, {
         ...ap,
-        lastSeenAt: new Date().toISOString(),
+        lastSeenAt,
         metrics: {
           ...ap.metrics,
           rssi: message.master_rx_rssi,
         },
+        discoveredLabels,
       });
     }
 
