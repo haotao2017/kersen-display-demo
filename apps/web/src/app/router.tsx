@@ -4,6 +4,7 @@ import { LoginPage } from '../pages/auth/LoginPage';
 import { RegisterPage } from '../pages/auth/RegisterPage';
 import { DashboardPage } from '../pages/dashboard/DashboardPage';
 import { ProductFormPage, ProductListPage } from '../pages/products/ProductPages';
+import { StoreListPage } from '../pages/stores/StorePages';
 import { TemplateDesignerPage, TemplateFormPage, TemplateListPage } from '../pages/templates/TemplatePages';
 import { EslDeviceDetailPage, EslDeviceListPage } from '../pages/esl-devices/EslDevicePages';
 import { ApDetailPage, ApListPage } from '../pages/aps/ApPages';
@@ -19,6 +20,7 @@ export const router = createBrowserRouter([
     children: [
       { index: true, element: <Navigate to="/dashboard" replace /> },
       { path: 'dashboard', element: <DashboardPage /> },
+      { path: 'stores', element: <StoreListPage /> },
       { path: 'products', element: <ProductListPage /> },
       { path: 'products/create', element: <ProductFormPage /> },
       { path: 'products/:id', element: <ProductFormPage /> },

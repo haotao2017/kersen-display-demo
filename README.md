@@ -42,6 +42,23 @@ docker compose up --build
 
 `DATABASE_URL` 配好后，门店、基站、标签、商品、模板、刷新任务会同步到 Postgres；不配置时仍使用本地 `apps/api/data/store.json`。`REDIS_URL` 配好后刷新任务进入 Redis/BullMQ 队列；不配置时使用进程内队列。
 
+## AWS 一键快速部署
+
+第一版最快可以用单台 EC2 跑完整系统：
+
+```bash
+aws configure
+AWS_REGION=ap-east-1 bash infra/aws-ec2-quickstart.sh
+```
+
+脚本会自动创建 EC2、安全组、SSH key，把当前项目上传到服务器，并用 Docker Compose 启动 Web、API、Postgres、Redis。部署完成后终端会输出控制台地址、API 地址和基站要填写的服务器地址。
+
+删除快速部署的 EC2：
+
+```bash
+AWS_REGION=ap-east-1 bash infra/aws-ec2-destroy.sh
+```
+
 也可以分开启动，调试时推荐这种方式：
 
 ```bash

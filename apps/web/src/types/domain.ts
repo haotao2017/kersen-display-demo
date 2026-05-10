@@ -50,6 +50,21 @@ export interface DashboardSummary {
   recentFailedTasks: Array<{ id: string; timestamp: string; title: string; message: string; related: string }>;
 }
 
+export interface Store {
+  id: string;
+  code: string;
+  name: string;
+  address?: string;
+  serverUrl?: string;
+  mqttTcpPort?: number;
+  mqttWsPath?: string;
+  apCount?: number;
+  onlineApCount?: number;
+  deviceCount?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Product {
   id: string;
   sku: string;
@@ -95,6 +110,7 @@ export interface TemplateElement {
   zIndex: number;
   bindingField?: string | null;
   expression?: string | null;
+  imageUrl?: string | null;
   style: Record<string, unknown>;
 }
 
@@ -138,6 +154,8 @@ export interface Template {
 export interface Ap {
   id: string;
   apCode: string;
+  storeCode?: string;
+  storeName?: string;
   name: string;
   ownerUserId?: string | null;
   owner?: Pick<User, 'id' | 'username' | 'displayName'> | null;
@@ -207,6 +225,7 @@ export interface DeviceDetail extends EslDevice {
 export interface EslDevice {
   id: string;
   eslCode: string;
+  storeCode?: string;
   name?: string;
   apId?: string;
   productId?: string;
@@ -232,7 +251,22 @@ export interface PushTask {
   apId?: string;
   payload: Record<string, unknown>;
   renderResult?: Record<string, unknown>;
+  userMessage?: string;
   resultMsg?: string;
+  delivery?: {
+    ok?: boolean;
+    reason?: string;
+    commandId?: string;
+    transport?: string;
+    websocket?: {
+      ok?: boolean;
+      trackingId?: string;
+      reason?: string;
+    };
+    mqtt?: unknown;
+    protocol?: Record<string, unknown>;
+    downlinkTrace?: Record<string, unknown>;
+  };
   retryCount: number;
   status: string;
   parentTaskId?: string;

@@ -96,6 +96,10 @@ function normalizeMac(value?: string) {
   return hex.match(/.{1,2}/g)?.join(':');
 }
 
+function normalizeApIdentifier(value?: string) {
+  return normalizeMac(value) ?? String(value ?? '').trim().toLowerCase();
+}
+
 function normalizeIp(value?: string) {
   if (!value) {
     return undefined;
@@ -110,6 +114,16 @@ function offlineAfterMs() {
 function apAutoImportEnabled(ap?: BaseStation) {
   const config = ap?.config && typeof ap.config === 'object' ? ap.config as Record<string, unknown> : {};
   return config.autoImportScannedLabels === true;
+}
+
+function readBool(value: unknown, fallback: boolean) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
 }
 
 function summarizeOutboundText(text: string) {
@@ -335,6 +349,7 @@ export class ApWebsocketService {
   private readonly activeSockets = new Map<string, WebSocket>();
   private readonly socketContexts = new WeakMap<WebSocket, ApSocketContext>();
   private readonly downlinkTraces: DownlinkTrace[] = [];
+  private readonly warmupIgnoreUntilByAp = new Map<string, number>();
 
   constructor(
     private readonly db: MemoryStore,
@@ -1145,6 +1160,25 @@ export class ApWebsocketService {
     };
   }
 
+  sendRawSilent(apId: string, payload: unknown) {
+    const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    const status = this.getConnectionStatus(apId);
+    if (!status.connected) {
+      return { ok: false, reason: 'AP websocket is not connected' };
+    }
+
+    const ws = this.activeSockets.get(apId);
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return { ok: false, reason: 'AP websocket is not connected' };
+    }
+
+    ws.send(text);
+    return {
+      ok: true,
+      bytes: Buffer.byteLength(text),
+    };
+  }
+
   sendBinary(apId: string, payload: Buffer | Uint8Array, meta: Record<string, unknown> = {}) {
     const bytes = Buffer.from(payload);
     const trace = this.createDownlinkTrace(apId, 'websocket-binary', {
@@ -1531,26 +1565,36 @@ export class ApWebsocketService {
     const send = toNumber(payload?.send_pkt_num, payload?.sendPktNum, payload?.send_pkt, payload?.send, res?.send_pkt_num, res?.sendPktNum, res?.send_pkt, res?.send, cmd?.send_pkt_num, cmd?.sendPktNum, cmd?.send_pkt, cmd?.send);
     const writeMs = toNumber(payload?.write_time_ms, payload?.writeTimeMs, payload?.write_ms, payload?.write, res?.write_time_ms, res?.writeTimeMs, res?.write_ms, res?.write, cmd?.write_time_ms, cmd?.writeTimeMs, cmd?.write_ms, cmd?.write);
     const rwTaskRest = toNumber(payload?.rw_task_rest, payload?.rwTaskRest);
-    const ackSendText = `ack/send=${ack ?? '-'} / ${send ?? '-'}`;
-    const errnoText = `errno=${errno ?? '-'}`;
-    const writeText = writeMs === undefined ? '' : ` · write=${writeMs}ms`;
-    const replyPrefix = `trace 状态：${trace.status} · AP 回包：${replyType || '-'}`;
+    const tasksCount = toNumber(payload?.tasks_count, payload?.tasksCount);
+    const technical = {
+      traceStatus: trace.status,
+      replyType: replyType || undefined,
+      cmdType: cmdType || undefined,
+      errno,
+      tasksCount,
+      ackPackets: ack,
+      sentPackets: send,
+      writeMs,
+      queueRemaining: rwTaskRest,
+    };
 
     let nextStatus = String(task.status ?? 'sent');
-    let resultMsg = String(task.resultMsg ?? '等待基站返回结果。');
+    let resultMsg = String(task.resultMsg ?? '正在等待基站返回结果。');
 
     if (trace.status === 'socket_missing' || trace.status === 'socket_write_error') {
       nextStatus = 'failed';
-      resultMsg = `下发失败：${trace.error ?? 'WebSocket 不可用'}`;
+      resultMsg = '基站连接不可用，刷新未发送。';
     } else if (trace.status === 'socket_write_ok') {
       nextStatus = 'sending';
-      resultMsg = `已下发（待执行确认），tracking=${trace.id}`;
+      resultMsg = '已发送到基站，正在等待价签确认。';
+    } else if (trace.status === 'ap_reply_seen' && replyType === 'READ_WRITE_SVC' && cmdType === 'DIS_CONN' && errno === 0 && tasksCount === 0) {
+      nextStatus = 'success';
+      resultMsg = '刷新成功，基站已完成本次下发。';
     } else if (trace.status === 'ap_reply_seen' && replyType === 'READ_WRITE_SVC' && cmdType === 'WRITE_SVC') {
       const ackSendOk = ack === undefined || send === undefined || ack === send;
       if (errno === 0) {
         nextStatus = 'success';
-        const ackWarning = ackSendOk ? '' : ' · 警告：设备确认包数量不一致，但设备返回 errno=0，按执行成功处理';
-        resultMsg = `执行确认成功：${replyPrefix} · cmd=WRITE_SVC · ${ackSendText} · ${errnoText}${writeText} · 执行确认成功（已收到设备执行结果（errno=0））${ackWarning}`;
+        resultMsg = ackSendOk ? '刷新成功，价签已确认。' : '刷新成功，价签已确认。';
       } else {
         nextStatus = 'failed';
         const reason = errno !== undefined && errno !== 0
@@ -1558,36 +1602,40 @@ export class ApWebsocketService {
           : ack !== undefined && send !== undefined && ack !== send
             ? '设备确认包数量不一致'
             : '设备执行结果异常';
-        resultMsg = `执行确认失败：${replyPrefix} · cmd=WRITE_SVC · ${ackSendText} · ${errnoText}${writeText} · ${reason}`;
+        resultMsg = `刷新失败：${reason}。`;
       }
     } else if (trace.status === 'ap_reply_seen' && replyType === 'AP_REPORT_STATUS') {
       if (rwTaskRest === 0) {
         const elapsedMs = Date.now() - new Date(trace.createdAt).getTime();
         if (elapsedMs >= Number(process.env.AP_WRITE_SVC_CONFIRM_TIMEOUT_MS ?? 20_000)) {
           nextStatus = 'timeout';
-          resultMsg = `执行确认超时：${replyPrefix} · rw_task_rest=0 · AP 队列已清空，但本次 trace 尚未看到 WRITE_SVC 执行结果`;
+          resultMsg = '基站队列已清空，但没有收到价签最终确认。';
         } else {
           nextStatus = 'sending';
-          resultMsg = `已下发（待执行确认）：${replyPrefix} · rw_task_rest=0 · AP 队列已清空，继续等待 WRITE_SVC 执行结果`;
+          resultMsg = '基站已处理完队列，正在等待价签最终确认。';
         }
       } else {
         nextStatus = 'sending';
-        resultMsg = `已下发（待执行确认）：${replyPrefix} · rw_task_rest=${rwTaskRest ?? '-'} · AP 队列仍有任务，继续等待 WRITE_SVC 执行结果`;
+        resultMsg = '基站正在处理刷新任务，请稍等。';
       }
     } else if (trace.status === 'ap_reply_seen') {
       nextStatus = 'sending';
-      resultMsg = `已收到基站回包但尚未确认执行结果：${replyPrefix} · 等待 READ_WRITE_SVC / WRITE_SVC`;
+      resultMsg = '已收到基站响应，正在等待价签确认。';
     }
 
     task.status = nextStatus;
     task.resultMsg = resultMsg;
     task.updatedAt = new Date().toISOString();
+    if (nextStatus === 'success') {
+      this.cancelAutoRetryChildren(task);
+    }
     task.events = [
       ...events,
       {
         id: `${trace.id}_${trace.updatedAt}`,
         time: trace.updatedAt,
         status: trace.status,
+        userMessage: this.taskUserMessage({ ...task, status: nextStatus, resultMsg }),
         message: resultMsg,
         trace: {
           id: trace.id,
@@ -1596,6 +1644,7 @@ export class ApWebsocketService {
           commandType: trace.commandType,
           labelId: trace.labelId,
           queueId: trace.queueId,
+          technical,
           reply,
           error: trace.error,
         },
@@ -1604,9 +1653,59 @@ export class ApWebsocketService {
     task.delivery = {
       ...(task.delivery && typeof task.delivery === 'object' ? task.delivery as Record<string, unknown> : {}),
       downlinkTrace: trace,
+      technical,
     };
     this.db.cloudTasks.set(String(task.id), task);
     this.db.save();
+  }
+
+  private taskUserMessage(task: Record<string, unknown>) {
+    const status = String(task.status ?? '').toLowerCase();
+    const taskType = String(task.taskType ?? '');
+    const result = String(task.resultMsg ?? '');
+    if (status === 'success') return taskType === 'auto_retry_after_wake' ? '补发任务已完成。' : '刷新已完成。';
+    if (status === 'skipped' || status === 'superseded' || status === 'cancelled') return '任务已取消。';
+    if (status === 'queued') return '任务已提交，正在排队。';
+    if (status === 'rendering') return '正在生成价签画面。';
+    if (status === 'sending') return taskType === 'auto_retry_after_wake' ? '正在补发刷新，请稍等。' : '已发送到基站，正在等待结果。';
+    if (status === 'timeout') return '等待基站确认超时，请稍后重试。';
+    if (status === 'failed') {
+      if (result.includes('没有在线基站') || result.includes('没有可用基站')) return '没有可用基站，刷新未发送。';
+      if (result.includes('WebSocket 不可用') || result.includes('MQTT 发布失败')) return '基站连接不可用，刷新未发送。';
+      if (result.includes('设备执行失败')) return '价签返回失败，请重试。';
+      return '任务失败，请重试。';
+    }
+    return '任务状态已更新。';
+  }
+
+  private cancelAutoRetryChildren(task: Record<string, unknown>) {
+    const taskId = String(task.id ?? '');
+    const childTaskId = String(task.childTaskId ?? '');
+    if (childTaskId) {
+      const child = this.db.cloudTasks.get(childTaskId);
+      if (child && String(child.taskType ?? '') === 'auto_retry_after_wake' && !['success', 'skipped'].includes(String(child.status ?? ''))) {
+        child.status = 'skipped';
+        child.resultMsg = '父任务已确认执行成功，自动补发任务已取消';
+        child.updatedAt = new Date().toISOString();
+        this.db.cloudTasks.set(childTaskId, child);
+      }
+    }
+
+    for (const child of this.db.cloudTasks.values()) {
+      if (
+        String(child.parentTaskId ?? '') === taskId
+        && String(child.taskType ?? '') === 'auto_retry_after_wake'
+        && !['success', 'skipped'].includes(String(child.status ?? ''))
+      ) {
+        child.status = 'skipped';
+        child.resultMsg = '父任务已确认执行成功，自动补发任务已取消';
+        child.updatedAt = new Date().toISOString();
+      }
+    }
+
+    if (String(task.resultMsg ?? '').includes('已自动打开监听窗口并补发一次刷新任务')) {
+      task.resultMsg = `${String(task.resultMsg).split('；已自动打开监听窗口并补发一次刷新任务')[0]}；父任务已确认成功，自动补发任务已取消`;
+    }
   }
 
   private extractCommandMeta(payload: unknown) {
@@ -1652,7 +1751,7 @@ export class ApWebsocketService {
     const addr = typeof parsed.addr === 'string' ? parsed.addr : undefined;
     const replyLabelId = addr ? addr.slice(0, 8) : undefined;
     const queueId = Number(parsed.queue_id ?? data?.queue_id);
-    const looksLikeAck = /ACK|RESULT|REPORT|STATUS|WRITE|ERROR|FAIL/i.test(type);
+    const looksLikeAck = /ACK|RESULT|REPORT|STATUS|WRITE|ERROR|FAIL/i.test(type) || (type === 'READ_WRITE_SVC' && Boolean(cmdType));
     const recent = this.downlinkTraces
       .filter((trace) => trace.apId === context.apId && Date.now() - new Date(trace.createdAt).getTime() < 120_000)
       .filter((trace) => !Number.isFinite(queueId) || trace.queueId === queueId || !trace.queueId)
@@ -1688,9 +1787,11 @@ export class ApWebsocketService {
       ? (parsed.res as Record<string, unknown>).errno
       : undefined;
 
-    // READ_WRITE_SVC 的 CONN_DEV / DIS_CONN 不是刷图成功结果；
-    // 但它们对无感唤醒/探活和定位连接失败很关键，需要绑定到 trace。
+    // READ_WRITE_SVC 的 CONN_DEV / DIS_CONN 通常是连接生命周期；
+    // 当前基站在写屏完成后会返回 DIS_CONN + errno=0 + tasks_count=0，需绑定到 trace 作为最终确认。
     if (type === 'READ_WRITE_SVC' && cmdType && cmdType !== 'WRITE_SVC') {
+      const tasksCount = Number(parsed.tasks_count ?? parsed.tasksCount);
+      const isFinalDisconn = cmdType === 'DIS_CONN' && errno === 0 && tasksCount === 0;
       if ((cmdType === 'CONN_DEV' || cmdType === 'DIS_CONN') && typeof errno === 'number') {
         for (const trace of recent) {
           const existingReply = trace.reply && typeof trace.reply === 'object' ? trace.reply as Record<string, unknown> : undefined;
@@ -1701,7 +1802,7 @@ export class ApWebsocketService {
             ? existingPayload.cmd as Record<string, unknown>
             : undefined;
           const existingCmdType = typeof existingCmd?.type === 'string' ? existingCmd.type : undefined;
-          if (existingPayload?.type === 'READ_WRITE_SVC' && existingCmdType === 'WRITE_SVC') {
+          if (!isFinalDisconn && existingPayload?.type === 'READ_WRITE_SVC' && existingCmdType === 'WRITE_SVC') {
             continue;
           }
           this.updateDownlinkTrace(trace.id, 'ap_reply_seen', {
@@ -1794,6 +1895,7 @@ export class ApWebsocketService {
     const context = this.socketContexts.get(ws);
     const type = typeof parsed.type === 'string' ? parsed.type : 'UNKNOWN';
     const apId = this.pickApId(parsed, context);
+    const ignoreLabelEvents = this.isWarmupScanIgnored(apId) && (type === 'DEVICE_RETRIEVE' || type === 'SLAVE_ADV_SVC');
     const storeCode = this.pickStoreCode(parsed, context);
     const envelope = {
       direction: 'ap_to_cloud',
@@ -1808,7 +1910,7 @@ export class ApWebsocketService {
       await this.mqtt.publishJson(`stores/${storeCode}/aps/${apId}/uplink`, envelope, { retain: true });
       await this.mqtt.publishJson(`stores/${storeCode}/aps/${apId}/events/${type}`, envelope, { retain: true });
 
-      if (type === 'DEVICE_RETRIEVE' && parsed.data && typeof parsed.data === 'object') {
+      if (!ignoreLabelEvents && type === 'DEVICE_RETRIEVE' && parsed.data && typeof parsed.data === 'object') {
         for (const [labelId, payload] of Object.entries(parsed.data as Record<string, unknown>)) {
           await this.mqtt.publishJson(`stores/${storeCode}/labels/${labelId}/events`, {
             ...envelope,
@@ -1818,7 +1920,7 @@ export class ApWebsocketService {
         }
       }
 
-      if (type === 'SLAVE_ADV_SVC' && typeof parsed.addr === 'string') {
+      if (!ignoreLabelEvents && type === 'SLAVE_ADV_SVC' && typeof parsed.addr === 'string') {
         const labelId = parsed.addr.slice(0, 8);
         await this.mqtt.publishJson(`stores/${storeCode}/labels/${labelId}/events`, {
           ...envelope,
@@ -1867,25 +1969,144 @@ export class ApWebsocketService {
     });
 
     const current = this.db.baseStations.get(apId);
+    const matchedAp = current ?? [...this.db.baseStations.values()].find((item) => (
+      item.storeCode === message.store_code
+      && normalizeApIdentifier(item.mac) === normalizeApIdentifier(message.ap_code)
+    ));
+    const nextApId = matchedAp?.id ?? apId;
     const ap: BaseStation = {
-      id: apId,
+      id: nextApId,
       storeCode: message.store_code,
-      name: current?.name ?? `AP ${apId}`,
-      mac: message.ap_code,
+      name: matchedAp?.name ?? `AP ${nextApId}`,
+      mac: message.ap_code ?? matchedAp?.mac,
       ip: message.ap_ip ?? remoteAddress,
-      firmware: message.ap_version ?? current?.firmware,
+      firmware: message.ap_version ?? matchedAp?.firmware,
       os: message.os,
       hostAddr: message.host_addr,
-      channels: current?.channels,
-      location: current?.location,
-      config: current?.config ?? {},
-      discoveredLabels: current?.discoveredLabels ?? {},
+      channels: matchedAp?.channels,
+      location: matchedAp?.location,
+      config: matchedAp?.config ?? {},
+      discoveredLabels: matchedAp?.discoveredLabels ?? {},
       status: 'online',
       lastSeenAt: new Date().toISOString(),
-      metrics: current?.metrics ?? {},
+      metrics: matchedAp?.metrics ?? {},
     };
+    if (nextApId !== apId) {
+      this.activeSockets.delete(apId);
+      this.activeSockets.set(nextApId, ws);
+      this.socketContexts.set(ws, {
+        ...(this.socketContexts.get(ws) ?? { connectedAt: new Date().toISOString() }),
+        apId: nextApId,
+        storeCode: message.store_code,
+        remoteAddress,
+        lastMessageAt: new Date().toISOString(),
+      });
+    }
     this.db.baseStations.set(ap.id, ap);
     this.db.save();
+    this.scheduleApWarmup(ap.id, ap.storeCode);
+  }
+
+  private scheduleApWarmup(apId: string, storeCode: string) {
+    if (!readBool(process.env.AP_ONLINE_WARMUP_ENABLED, true)) {
+      return;
+    }
+
+    const ignoreMs = Math.max(5000, Math.min(120000, Number(process.env.AP_ONLINE_WARMUP_IGNORE_SCAN_MS ?? 30000)));
+    this.warmupIgnoreUntilByAp.set(apId, Date.now() + ignoreMs);
+    setTimeout(() => {
+      void this.runApWarmup(apId, storeCode).catch((error) => {
+        this.logger.warn(`AP warmup failed for ${apId}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }, Math.max(0, Math.min(10000, Number(process.env.AP_ONLINE_WARMUP_DELAY_MS ?? 800))));
+  }
+
+  private async runApWarmup(apId: string, storeCode: string) {
+    if (!this.activeSockets.has(apId)) {
+      return;
+    }
+
+    const durationMs = Math.max(3000, Math.min(60000, Number(process.env.AP_ONLINE_WARMUP_PSM_DURATION_MS ?? 12000)));
+    const delayMs = Math.max(100, Math.min(3000, Number(process.env.AP_ONLINE_WARMUP_STEP_DELAY_MS ?? 300)));
+    const commands = [
+      this.buildApWarmupServiceConfigCommand(),
+      this.buildApWarmupPsmCommand(durationMs),
+    ];
+
+    for (const command of commands) {
+      this.sendRawSilent(apId, command);
+      await this.publishWarmupMqttCommand(storeCode, apId, command);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  private async publishWarmupMqttCommand(storeCode: string, apId: string, command: Record<string, unknown>) {
+    const normalizedAp = apId.trim();
+    const apUpper = normalizedAp.toUpperCase();
+    const apNoColonUpper = normalizedAp.replace(/:/g, '').toUpperCase();
+    const apNoColonLower = normalizedAp.replace(/:/g, '').toLowerCase();
+    const topics = [...new Set([
+      `${storeCode}/${normalizedAp}/cmd`,
+      `${storeCode}/${apUpper}/cmd`,
+      `${storeCode}/${apNoColonUpper}/cmd`,
+      `${storeCode}/${apNoColonLower}/cmd`,
+    ])];
+    await Promise.all(topics.map((topic) => this.mqtt.publishJson(topic, command, { retain: false }).catch(() => undefined)));
+  }
+
+  private buildApWarmupServiceConfigCommand() {
+    return {
+      type: 'AP_SVC_CFG',
+      adv_group: 32,
+      adv_psm_interval_sec: 60,
+      adv_listen_slave_enable: true,
+      adv_psm_cfg: {
+        enable: true,
+        duration_ms: 5000,
+        act_time_us: 3000,
+        slp_cycle_ms: 4000,
+        adv_interval_ms: 60000,
+        adv_map: 7,
+        wait_conn_ch_idx: 10,
+      },
+      rd_wr_svc_cfg: {
+        retry_num: 3,
+        parallel_num: 3,
+        ap_chn_num: 255,
+      },
+    };
+  }
+
+  private buildApWarmupPsmCommand(durationMs: number) {
+    return {
+      type: 'AP_PSM',
+      data: {
+        mode: 'fast',
+        adv_group: 32,
+        merge: {
+          enable: true,
+          duration_ms: durationMs,
+          act_time_us: 3000,
+          slp_cycle_ms: 4000,
+          adv_interval_ms: 60000,
+          retry_num: 3,
+          parallel_num: 3,
+          ap_chn_num: 255,
+        },
+      },
+    };
+  }
+
+  private isWarmupScanIgnored(apId?: string) {
+    if (!apId) {
+      return false;
+    }
+    const until = this.warmupIgnoreUntilByAp.get(apId) ?? 0;
+    if (until <= Date.now()) {
+      this.warmupIgnoreUntilByAp.delete(apId);
+      return false;
+    }
+    return true;
   }
 
   private applyApChannels(message: ApChannelListMessage, context?: ApSocketContext) {
@@ -1912,6 +2133,9 @@ export class ApWebsocketService {
     const apId = ap?.id;
     const storeCode = ap?.storeCode ?? process.env.UPSTREAM_STORE_CODE ?? '20248517';
     const seenLabelIds = new Set(entries.map(([labelId]) => labelId));
+    if (this.isWarmupScanIgnored(apId)) {
+      return;
+    }
     const shouldAutoImport = apAutoImportEnabled(ap);
     const discoveredLabels = { ...(ap?.discoveredLabels ?? {}) };
 
@@ -1985,6 +2209,9 @@ export class ApWebsocketService {
 
     const ap = (context?.apId ? this.db.baseStations.get(context.apId) : undefined)
       ?? [...this.db.baseStations.values()].find((item) => item.status === 'online');
+    if (this.isWarmupScanIgnored(ap?.id)) {
+      return;
+    }
     const current = this.db.labels.get(labelId);
     const currentRow = (current ?? {}) as Label & Record<string, unknown>;
     const services = Object.fromEntries((message.service_list ?? []).map((item) => [item.service ?? 'unknown', item.b64dat ?? '']));

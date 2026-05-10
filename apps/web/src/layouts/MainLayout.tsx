@@ -1,4 +1,4 @@
-import { DesktopOutlined, DeploymentUnitOutlined, HomeOutlined, InboxOutlined, SettingOutlined, ShoppingOutlined, TagsOutlined } from '@ant-design/icons';
+import { DesktopOutlined, DeploymentUnitOutlined, HomeOutlined, InboxOutlined, SettingOutlined, ShopOutlined, ShoppingOutlined, TagsOutlined } from '@ant-design/icons';
 import { App, Badge, Button, Layout, Menu, Select, Space, Tag, Typography } from 'antd';
 import { Link, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useEffect } from 'react';
@@ -53,6 +53,7 @@ export const MainLayout = () => {
 
   const items = [
     { key: '/dashboard', icon: <HomeOutlined />, label: <Link to="/dashboard">{tx('仪表盘', 'Dashboard')}</Link> },
+    { key: '/stores', icon: <ShopOutlined />, label: <Link to="/stores">{tx('门店管理', 'Stores')}</Link> },
     { key: '/products', icon: <ShoppingOutlined />, label: <Link to="/products">{tx('商品管理', 'Data Source')}</Link> },
     { key: '/templates', icon: <TagsOutlined />, label: <Link to="/templates">{tx('模板管理', 'Templates')}</Link> },
     { key: '/esl-devices', icon: <DesktopOutlined />, label: <Link to="/esl-devices">{tx('ESL 设备', 'Display Nodes')}</Link> },
@@ -90,7 +91,7 @@ export const MainLayout = () => {
             </div>
           </div> */}
         </div>
-        <Menu mode="inline" selectedKeys={[location.pathname.startsWith('/templates/') ? '/templates' : location.pathname]} items={items} />
+        <Menu mode="inline" selectedKeys={[location.pathname.startsWith('/templates/') ? '/templates' : location.pathname.startsWith('/stores') ? '/stores' : location.pathname]} items={items} />
       </Sider>
       <Layout>
         <Header style={{ background: 'rgba(255,255,255,0.72)', backdropFilter: 'blur(12px)', borderBottom: '1px solid #ece6dd' }}>

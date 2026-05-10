@@ -4,10 +4,18 @@ import dayjs from 'dayjs';
 import { api } from '../../api';
 import { useI18n } from '../../i18n';
 import { queryKeys } from '../../utils/constants';
+import { getTaskUserText } from '../../utils/taskText';
 
 export const DashboardPage = () => {
   const { tx } = useI18n();
   const { data, isPending } = useQuery({ queryKey: queryKeys.dashboard, queryFn: api.dashboard });
+  const apEventText = (item: any) => {
+    const raw = String(item?.message ?? '');
+    if (raw.includes('离线') || raw.toLowerCase().includes('offline')) return tx('基站离线', 'Station offline');
+    if (raw.includes('在线') || raw.toLowerCase().includes('online')) return tx('基站在线', 'Station online');
+    return tx('基站状态已更新', 'Station status updated');
+  };
+
   return (
     <Row gutter={[16, 16]}>
       <Col span={6}><Card loading={isPending}><Statistic title={tx('AP 在线', 'AP Online')} value={data?.apOnlineCount ?? 0} /></Card></Col>
@@ -24,7 +32,7 @@ export const DashboardPage = () => {
                   title={item.title}
                   description={(
                     <div>
-                      <div>{item.message}</div>
+                      <div>{apEventText(item)}</div>
                       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                         {dayjs(item.timestamp).format('YYYY-MM-DD HH:mm:ss')}
                       </Typography.Text>
@@ -46,7 +54,7 @@ export const DashboardPage = () => {
                   title={item.title}
                   description={(
                     <div>
-                      <div>{item.message}</div>
+                      <div>{getTaskUserText({ ...item, status: 'failed' }, tx)}</div>
                       {item.related ? <div>{item.related}</div> : null}
                       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                         {dayjs(item.timestamp).format('YYYY-MM-DD HH:mm:ss')}

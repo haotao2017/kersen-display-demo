@@ -1,12 +1,13 @@
-import { App, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Popconfirm, Select, Space, Switch, Table, Tag, Typography } from 'antd';
+import { App, Button, Card, Collapse, Descriptions, Drawer, Form, Input, InputNumber, Popconfirm, Select, Space, Switch, Table, Tag, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../api';
 import { useAppStore } from '../../app/store';
 import { PageHeaderCard } from '../../components/common/PageHeaderCard';
 import { useI18n } from '../../i18n';
 import { queryKeys } from '../../utils/constants';
+import { buildTaskStatusLabels, getTaskUserText, normalizeTaskStatus } from '../../utils/taskText';
 
 export const ApListPage = () => {
   const { tx } = useI18n();
@@ -16,6 +17,8 @@ export const ApListPage = () => {
   const [form] = Form.useForm();
   const [open, setOpen] = useState(false);
   const { data, isPending } = useQuery({ queryKey: queryKeys.aps, queryFn: () => api.aps({}), refetchInterval: 10_000 });
+  const { data: stores } = useQuery({ queryKey: queryKeys.stores, queryFn: () => api.stores({}), refetchInterval: 10_000 });
+  const storeOptions = useMemo(() => (stores?.items ?? []).map((item: any) => ({ label: `${item.name} / ${item.code}`, value: item.code })), [stores]);
   const create = useMutation({
     mutationFn: api.createAp,
     onSuccess: () => {
@@ -64,48 +67,64 @@ export const ApListPage = () => {
       >
         {tx('用于登记 eStation / AP 基站信息。当前仅监听已登记基站的主题，自动发现的价签会单独展示，不再直接算作正式绑定设备。', 'Register eStation / AP stations here. Only registered station topics are subscribed, and auto-discovered labels are shown separately instead of being counted as formally bound devices.')}
       </PageHeaderCard>
-      <Card>
-        <Table
-          rowKey="id"
-          loading={isPending}
-          dataSource={data?.items ?? []}
-          columns={[
-            { title: tx('AP 编码', 'AP Code'), dataIndex: 'apCode' },
-            { title: tx('名称', 'Name'), dataIndex: 'name' },
-            {
-              title: tx('状态', 'Status'),
-              render: (_, row: any) => (
-                <Tag color={row.online ? 'green' : 'default'}>
-                  {row.online ? tx('在线', 'Online') : tx('离线', 'Offline')}
-                </Tag>
-              ),
-            },
-            { title: tx('已绑定显示节点数', 'Bound Display Nodes'), dataIndex: 'deviceCount' },
-            { title: tx('自动发现显示节点数', 'Discovered Display Nodes'), dataIndex: 'discoveredDeviceCount' },
-            {
-              title: tx('操作', 'Actions'),
-              render: (_, row: any) => (
-                <Space>
-                  <Button onClick={() => navigate(`/aps/${row.id}`)}>{tx('查看', 'View')}</Button>
-                  <Switch
-                    checked={row.config?.autoImportScannedLabels === true}
-                    checkedChildren={tx('入库开', 'Import on')}
-                    unCheckedChildren={tx('入库关', 'Import off')}
-                    loading={updateAutoImport.isPending && updateAutoImport.variables?.id === row.id}
-                    onChange={(checked) => {
-                      if (checked) {
-                        confirmEnableAutoImport(row);
-                        return;
-                      }
-                      updateAutoImport.mutate({ id: row.id, enabled: false });
-                    }}
-                  />
-                </Space>
-              ),
-            },
-          ]}
-        />
-      </Card>
+      <Collapse
+        defaultActiveKey={(stores?.items ?? []).map((item: any) => item.code)}
+        items={(stores?.items ?? []).map((store: any) => {
+          const rows = (data?.items ?? []).filter((item: any) => item.storeCode === store.code);
+          return {
+            key: store.code,
+            label: (
+              <Space>
+                <span>{store.name}</span>
+                <Tag>{store.code}</Tag>
+                <Tag color={rows.some((item: any) => item.online) ? 'green' : 'default'}>{rows.filter((item: any) => item.online).length}/{rows.length}</Tag>
+              </Space>
+            ),
+            children: (
+              <Table
+                rowKey="id"
+                loading={isPending}
+                dataSource={rows}
+                columns={[
+                  { title: tx('AP 编码', 'AP Code'), dataIndex: 'apCode' },
+                  { title: tx('名称', 'Name'), dataIndex: 'name' },
+                  {
+                    title: tx('状态', 'Status'),
+                    render: (_, row: any) => (
+                      <Tag color={row.online ? 'green' : 'default'}>
+                        {row.online ? tx('在线', 'Online') : tx('离线', 'Offline')}
+                      </Tag>
+                    ),
+                  },
+                  { title: tx('已绑定显示节点数', 'Bound Display Nodes'), dataIndex: 'deviceCount' },
+                  { title: tx('自动发现显示节点数', 'Discovered Display Nodes'), dataIndex: 'discoveredDeviceCount' },
+                  {
+                    title: tx('操作', 'Actions'),
+                    render: (_, row: any) => (
+                      <Space>
+                        <Button onClick={() => navigate(`/aps/${row.id}`)}>{tx('查看', 'View')}</Button>
+                        <Switch
+                          checked={row.config?.autoImportScannedLabels === true}
+                          checkedChildren={tx('入库开', 'Import on')}
+                          unCheckedChildren={tx('入库关', 'Import off')}
+                          loading={updateAutoImport.isPending && updateAutoImport.variables?.id === row.id}
+                          onChange={(checked) => {
+                            if (checked) {
+                              confirmEnableAutoImport(row);
+                              return;
+                            }
+                            updateAutoImport.mutate({ id: row.id, enabled: false });
+                          }}
+                        />
+                      </Space>
+                    ),
+                  },
+                ]}
+              />
+            ),
+          };
+        })}
+      />
       <Drawer
         title={tx('新增基站', 'New Station')}
         open={open}
@@ -120,6 +139,7 @@ export const ApListPage = () => {
           onFinish={(values) =>
             create.mutate({
               apCode: values.apCode,
+              storeCode: values.storeCode,
               name: values.name,
               ip: values.ip,
               mac: values.mac,
@@ -133,18 +153,17 @@ export const ApListPage = () => {
             })
           }
         >
+          <Form.Item name="storeCode" label={tx('所属门店', 'Store')} rules={[{ required: true, message: tx('请选择门店', 'Select a store') }]}>
+            <Select options={storeOptions} placeholder={tx('请选择门店', 'Select a store')} />
+          </Form.Item>
           <Form.Item
             name="apCode"
             label={tx('AP 编码', 'AP Code')}
-            rules={[
-              { required: true, message: tx('请输入 4 位基站编码', 'Enter a 4-character station code') },
-              { pattern: /^[0-9A-Za-z]{4}$/, message: tx('AP 编码必须是 4 位字母或数字', 'AP code must be 4 letters or digits') },
-            ]}
           >
-            <Input placeholder={tx('例如 0019', 'e.g. 0019')} />
+            <Input placeholder={tx('可不填，系统自动生成', 'Optional, generated automatically')} />
           </Form.Item>
-          <Form.Item name="name" label={tx('基站名称', 'Station Name')} rules={[{ required: true, message: tx('请输入基站名称', 'Enter station name') }]}>
-            <Input placeholder={tx('例如 一楼生鲜区基站', 'e.g. Fresh Area Station')} />
+          <Form.Item name="name" label={tx('基站名称', 'Station Name')}>
+            <Input placeholder={tx('可选，例如 一楼生鲜区基站', 'Optional, e.g. Fresh Area Station')} />
           </Form.Item>
           <Form.Item name="ip" label={tx('IP 地址', 'IP Address')}>
             <Input placeholder={tx('例如 192.168.1.10', 'e.g. 192.168.1.10')} />
@@ -181,6 +200,7 @@ export const ApListPage = () => {
 
 export const ApDetailPage = () => {
   const { tx } = useI18n();
+  const TASK_STATUS_LABELS = buildTaskStatusLabels(tx);
   const { message } = App.useApp();
   const { id = '' } = useParams();
   const queryClient = useQueryClient();
@@ -190,6 +210,8 @@ export const ApDetailPage = () => {
   const [transferForm] = Form.useForm();
   const [editOpen, setEditOpen] = useState(false);
   const [transferOpen, setTransferOpen] = useState(false);
+  const { data: stores } = useQuery({ queryKey: queryKeys.stores, queryFn: () => api.stores({}), refetchInterval: 10_000 });
+  const storeOptions = useMemo(() => (stores?.items ?? []).map((item: any) => ({ label: `${item.name} / ${item.code}`, value: item.code })), [stores]);
   const { data: liveData, isPending: isSummaryPending } = useQuery({
     queryKey: queryKeys.apSummary(id),
     queryFn: () => api.ap(id),
@@ -287,6 +309,7 @@ export const ApDetailPage = () => {
                 setEditOpen(true);
                 editForm.setFieldsValue({
                   apCode: summary?.apCode,
+                  storeCode: summary?.storeCode,
                   name: summary?.name,
                   ip: summary?.ip,
                   mac: summary?.mac,
@@ -402,8 +425,8 @@ export const ApDetailPage = () => {
           pagination={false}
           columns={[
             { title: tx('任务类型', 'Task Type'), dataIndex: 'taskType' },
-            { title: tx('状态', 'Status'), dataIndex: 'status' },
-            { title: tx('结果', 'Result'), dataIndex: 'resultMsg' },
+            { title: tx('状态', 'Status'), render: (_, row: any) => TASK_STATUS_LABELS[normalizeTaskStatus(row.status)] ?? row.status },
+            { title: tx('结果', 'Result'), render: (_, row: any) => getTaskUserText(row, tx) },
             { title: tx('更新时间', 'Updated At'), dataIndex: 'updatedAt' },
           ]}
         />
@@ -490,6 +513,7 @@ export const ApDetailPage = () => {
           onFinish={(values) =>
             updateAp.mutate({
               apCode: values.apCode,
+              storeCode: values.storeCode,
               name: values.name,
               ip: values.ip,
               mac: values.mac,
@@ -503,18 +527,17 @@ export const ApDetailPage = () => {
             })
           }
         >
+          <Form.Item name="storeCode" label={tx('所属门店', 'Store')} rules={[{ required: true, message: tx('请选择门店', 'Select a store') }]}>
+            <Select options={storeOptions} />
+          </Form.Item>
           <Form.Item
             name="apCode"
             label={tx('AP 编码', 'AP Code')}
-            rules={[
-              { required: true, message: tx('请输入 4 位基站编码', 'Enter a 4-character station code') },
-              { pattern: /^[0-9A-Za-z]{4}$/, message: tx('AP 编码必须是 4 位字母或数字', 'AP code must be 4 letters or digits') },
-            ]}
           >
-            <Input placeholder={tx('例如 0019', 'e.g. 0019')} />
+            <Input placeholder={tx('可选，例如 0019', 'Optional, e.g. 0019')} />
           </Form.Item>
-          <Form.Item name="name" label={tx('基站名称', 'Station Name')} rules={[{ required: true, message: tx('请输入基站名称', 'Enter station name') }]}>
-            <Input placeholder={tx('例如 一楼生鲜区基站', 'e.g. Fresh Area Station')} />
+          <Form.Item name="name" label={tx('基站名称', 'Station Name')}>
+            <Input placeholder={tx('可选，例如 一楼生鲜区基站', 'Optional, e.g. Fresh Area Station')} />
           </Form.Item>
           <Form.Item name="ip" label={tx('IP 地址', 'IP Address')}>
             <Input placeholder={tx('例如 192.168.1.10', 'e.g. 192.168.1.10')} />

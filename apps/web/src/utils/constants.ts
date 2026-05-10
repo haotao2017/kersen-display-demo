@@ -1,9 +1,10 @@
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000/api/v1';
-export const EVENTS_URL = import.meta.env.VITE_EVENTS_URL ?? 'http://localhost:4000/api/v1/events/stream';
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '/api/v1';
+export const EVENTS_URL = import.meta.env.VITE_EVENTS_URL ?? '/api/v1/events/stream';
 
 export const queryKeys = {
   dashboard: ['dashboard'],
   me: ['me'],
+  stores: ['stores'],
   products: ['products'],
   product: (id: string) => ['product', id],
   templates: ['templates'],

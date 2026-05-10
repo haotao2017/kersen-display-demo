@@ -1,56 +1,13 @@
-import { Alert, App, Button, Card, Descriptions, Divider, Drawer, Space, Table, Tag, Typography } from 'antd';
+import { Alert, App, Button, Card, Descriptions, Divider, Drawer, Modal, Space, Table, Tag, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import dayjs from 'dayjs';
 import { api } from '../../api';
 import { useI18n } from '../../i18n';
 import { queryKeys } from '../../utils/constants';
-
-const buildTaskStatusLabels = (tx: (zh: string, en: string) => string): Record<string, string> => ({
-  queued: tx('排队中', 'Queued'),
-  rendering: tx('处理中', 'Rendering'),
-  ready: tx('已准备好', 'Ready'),
-  sending: tx('发送中', 'Sending'),
-  sent: tx('已下发', 'Sent'),
-  success: tx('成功', 'Success'),
-  failed: tx('失败', 'Failed'),
-  timeout: tx('超时', 'Timeout'),
-  cancelled: tx('已取消', 'Cancelled'),
-});
-
-const buildTaskTypeLabels = (tx: (zh: string, en: string) => string): Record<string, string> => ({
-  bind: tx('绑定设备', 'Bind Device'),
-  unbind: tx('解绑设备', 'Unbind Device'),
-  refresh: tx('刷新屏幕', 'Refresh Screen'),
-  adjust: tx('调整设备', 'Adjust Device'),
-  search_devices: tx('搜索设备', 'Search Devices'),
-  sync_status: tx('同步状态', 'Sync Status'),
-  config_push: tx('下发配置', 'Push Config'),
-});
+import { buildTaskStatusLabels, buildTaskTypeLabels, getTaskProgressText, getTaskSummary, getTaskUserText, normalizeTaskStatus } from '../../utils/taskText';
 
 const formatDateTime = (value?: string | null) => (value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-');
-const normalizeTaskStatus = (value: unknown) => String(value ?? '').trim().toLowerCase();
-
-const getTaskSummary = (detail: any, tx: (zh: string, en: string) => string) => {
-  const status = normalizeTaskStatus(detail?.status);
-  if (!detail) return tx('正在加载任务详情...', 'Loading task details...');
-  if (detail.resultMsg) return detail.resultMsg;
-  if (status === 'queued') return tx('任务已经提交，正在排队处理中。', 'The task has been submitted and is waiting in queue.');
-  if (status === 'rendering') return tx('系统正在生成要显示的内容。', 'The system is generating content for display.');
-  if (status === 'sending') return tx('内容已经发出，正在等待基站返回结果。', 'The content has been sent and is waiting for the station result.');
-  if (status === 'success') return tx('任务已经完成。', 'The task has completed.');
-  if (status === 'failed') return tx('任务执行失败，请查看原因后重试。', 'The task failed. Please review the reason and try again.');
-  if (status === 'timeout') return tx('等待时间较长，暂时没有收到最终结果。', 'No final result has been received yet.');
-  return tx('任务状态已更新。', 'Task status updated.');
-};
-
-const getTaskProgressText = (detail: any, tx: (zh: string, en: string) => string) => {
-  const analysis = detail?.renderResult?.analysis;
-  if (!analysis) return '-';
-  if (analysis.allRequestedTagsPresent && analysis.allRequestedTokensMatched) return tx('设备已确认完成刷新', 'The device confirmed the refresh.');
-  if (analysis.allRequestedTagsPresent) return tx('已经找到设备，正在等待最终确认', 'The device was found and is waiting for final confirmation.');
-  return tx('基站已响应，正在继续确认设备状态', 'The station responded and device confirmation is still in progress.');
-};
 
 export const TaskListPage = () => {
   const { tx } = useI18n();
@@ -76,6 +33,14 @@ export const TaskListPage = () => {
       message.success(tx('已提交重试任务', 'Retry task submitted'));
     },
   });
+  const remove = useMutation({
+    mutationFn: api.deleteTask,
+    onSuccess: (_, id) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.tasks });
+      if (taskId === id) setTaskId(null);
+      message.success(tx('任务已删除', 'Task deleted'));
+    },
+  });
 
   const detailStatus = normalizeTaskStatus(detail?.status);
   const detailTaskType = detail?.taskType ? String(detail.taskType) : '';
@@ -96,7 +61,7 @@ export const TaskListPage = () => {
             { title: tx('状态', 'Status'), render: (_, row: any) => TASK_STATUS_LABELS[normalizeTaskStatus(row.status)] ?? row.status },
             { title: tx('触发时间', 'Triggered At'), render: (_, row: any) => formatDateTime(row.triggeredAt ?? row.createdAt) },
             { title: tx('重试次数', 'Retries'), dataIndex: 'retryCount' },
-            { title: tx('结果', 'Result'), dataIndex: 'resultMsg' },
+            { title: tx('结果', 'Result'), render: (_, row: any) => getTaskUserText(row, tx) },
             {
               title: tx('操作', 'Actions'),
               render: (_, row: any) => (
@@ -109,13 +74,30 @@ export const TaskListPage = () => {
                   >
                     {tx('重试', 'Retry')}
                   </Button>
+                  <Button
+                    danger
+                    loading={remove.isPending && remove.variables === row.id}
+                    onClick={() => {
+                      Modal.confirm({
+                        title: tx('删除任务？', 'Delete task?'),
+                        content: tx('删除后仅移除任务记录，不会删除基站、价签或商品数据。', 'This only removes the task record. It will not delete stations, labels, or products.'),
+                        okText: tx('删除', 'Delete'),
+                        cancelText: tx('取消', 'Cancel'),
+                        okButtonProps: { danger: true },
+                        centered: true,
+                        onOk: () => remove.mutateAsync(row.id),
+                      });
+                    }}
+                  >
+                    {tx('删除', 'Delete')}
+                  </Button>
                 </Space>
               ),
             },
           ]}
         />
       </Card>
-      <Drawer open={Boolean(taskId)} onClose={() => setTaskId(null)} title={tx('任务详情', 'Task Details')} width={640}>
+      <Drawer open={Boolean(taskId)} onClose={() => setTaskId(null)} title={tx('任务详情', 'Task Details')} width={720}>
         <Space direction="vertical" size={16} style={{ width: '100%' }}>
           <Alert
             type={detailStatus === 'success' ? 'success' : detailStatus === 'failed' ? 'error' : detailStatus === 'timeout' ? 'warning' : 'info'}
@@ -149,9 +131,18 @@ export const TaskListPage = () => {
 
           <Card size="small" title={tx('当前进度', 'Progress')} loading={isDetailPending}>
             <Descriptions column={1} size="small" labelStyle={{ width: 140 }}>
-              <Descriptions.Item label={tx('处理说明', 'Result Note')}>{detail?.resultMsg ?? '-'}</Descriptions.Item>
+              <Descriptions.Item label={tx('处理说明', 'Result Note')}>{getTaskSummary(detail, tx)}</Descriptions.Item>
               <Descriptions.Item label={tx('设备确认情况', 'Device Confirmation')}>{getTaskProgressText(detail, tx)}</Descriptions.Item>
               <Descriptions.Item label={tx('上次设备刷新时间', 'Last Device Refresh')}>{formatDateTime(detail?.eslDevice?.lastRefreshAt)}</Descriptions.Item>
+            </Descriptions>
+          </Card>
+
+          <Card size="small" title={tx('技术详情', 'Technical Details')} loading={isDetailPending}>
+            <Descriptions column={1} size="small" labelStyle={{ width: 120 }}>
+              <Descriptions.Item label={tx('原始说明', 'Raw Message')}>{detail?.resultMsg ?? '-'}</Descriptions.Item>
+              <Descriptions.Item label={tx('下发方式', 'Transport')}>{detail?.delivery?.transport ?? '-'}</Descriptions.Item>
+              <Descriptions.Item label={tx('命令编号', 'Command ID')}>{detail?.delivery?.commandId ?? '-'}</Descriptions.Item>
+              <Descriptions.Item label={tx('追踪编号', 'Tracking ID')}>{detail?.delivery?.websocket?.trackingId ?? '-'}</Descriptions.Item>
             </Descriptions>
           </Card>
 
@@ -164,7 +155,7 @@ export const TaskListPage = () => {
               columns={[
                 { title: tx('时间', 'Time'), dataIndex: 'time', render: (value) => formatDateTime(value) },
                 { title: tx('状态', 'Status'), dataIndex: 'status' },
-                { title: tx('说明', 'Message'), dataIndex: 'message' },
+                { title: tx('说明', 'Message'), render: (_, row: any) => getTaskUserText({ ...detail, status: row.status, resultMsg: row.message }, tx) },
                 {
                   title: tx('回包', 'Reply'),
                   render: (_, row: any) => row.trace?.reply ? (
@@ -207,7 +198,7 @@ export const TaskListPage = () => {
                           { title: tx('时间', 'Time'), render: (_, row: any) => formatDateTime(row.createdAt) },
                           { title: tx('触发时间', 'Triggered At'), render: (_, row: any) => formatDateTime(row.triggeredAt ?? row.createdAt) },
                           { title: tx('状态', 'Status'), render: (_, row: any) => TASK_STATUS_LABELS[normalizeTaskStatus(row.status)] ?? row.status },
-                          { title: tx('结果', 'Result'), dataIndex: 'resultMsg' },
+                          { title: tx('结果', 'Result'), render: (_, row: any) => getTaskUserText(row, tx) },
                         ]}
                       />
                     </div>

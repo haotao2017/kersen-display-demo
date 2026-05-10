@@ -1,5 +1,5 @@
 import { http } from '../services/http';
-import type { AuditLog, DashboardSummary, Paginated, Product, Template, TemplateSchema, EslDevice, Ap, PushTask, User, UserInvite, DeviceDetail, TemplatePreview, UploadImageResult } from '../types/domain';
+import type { AuditLog, DashboardSummary, Paginated, Product, Template, TemplateSchema, EslDevice, Ap, PushTask, User, UserInvite, DeviceDetail, TemplatePreview, UploadImageResult, Store } from '../types/domain';
 
 export interface RefreshLinkedResult {
   attempted: boolean;
@@ -32,6 +32,10 @@ export const api = {
     http.post<{ accessToken: string; refreshToken: string; expiresIn: number; user: User }>('/auth/register', payload),
   logout: (payload: { refreshToken: string }) => http.post<boolean>('/auth/logout', payload),
   dashboard: () => http.get<DashboardSummary>('/dashboard/summary'),
+  stores: (params?: Record<string, unknown>) => http.get<Paginated<Store>>('/stores', { params }),
+  createStore: (payload: Pick<Store, 'code' | 'name'> & { address?: string }) => http.post<Store>('/stores', payload),
+  updateStore: (code: string, payload: Pick<Store, 'code' | 'name'> & { address?: string }) => http.put<Store>(`/stores/${code}`, payload),
+  deleteStore: (code: string) => http.delete<{ deleted: boolean; code: string }>(`/stores/${code}`),
   products: (params?: Record<string, unknown>) => http.get<Paginated<Product>>('/products', { params }),
   product: (id: string) => http.get<Product & { defaultTemplate?: Template | null; boundDevices?: EslDevice[] }>(`/products/${id}`),
   createProduct: (payload: Partial<Product>) => http.post<Product>('/products', payload),
@@ -49,7 +53,7 @@ export const api = {
   deleteTemplate: (id: string) => http.delete<{ deleted: boolean; id: string }>(`/templates/${id}`),
   deleteTemplateVersion: (id: string, versionId: string) => http.delete<{ deleted: boolean; versionId: string }>(`/templates/${id}/versions/${versionId}`),
   devices: (params?: Record<string, unknown>) => http.get<Paginated<EslDevice>>('/esl-devices', { params }),
-  createDevice: (payload: { eslCode: string; name: string; apId?: string; deviceType?: string }) => http.post<EslDevice>('/esl-devices', payload),
+  createDevice: (payload: { eslCode: string; name: string; apId?: string; storeCode?: string; deviceType?: string }) => http.post<EslDevice>('/esl-devices', payload),
   updateDevice: (id: string, payload: { eslCode: string; name: string; apId?: string | null; productId?: string | null; templateId?: string | null }) => http.put<EslDevice>(`/esl-devices/${id}`, payload),
   device: (id: string) => http.get<DeviceDetail>(`/esl-devices/${id}`),
   bindDevice: (id: string, payload: { productId: string; templateId?: string; autoRefresh?: boolean }) => http.post<DeviceDetail>(`/esl-devices/${id}/bind`, payload),
@@ -73,6 +77,7 @@ export const api = {
   tasks: (params?: Record<string, unknown>) => http.get<Paginated<PushTask>>('/tasks', { params }),
   task: (id: string) => http.get<PushTask>(`/tasks/${id}`),
   retryTask: (id: string) => http.post<PushTask>(`/tasks/${id}/retry`),
+  deleteTask: (id: string) => http.delete<{ deleted: boolean; id: string }>(`/tasks/${id}`),
   batchRefreshTasks: (payload: { productIds?: string[]; templateIds?: string[]; deviceIds?: string[]; reason?: string }) => http.post<{ ok: boolean }>('/tasks/batch-refresh', payload),
   users: () => http.get<User[]>('/users'),
   userInvites: () => http.get<UserInvite[]>('/users/invites'),

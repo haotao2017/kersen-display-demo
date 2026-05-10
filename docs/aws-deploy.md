@@ -25,6 +25,42 @@ docker build -f infra/Dockerfile.api -t kersen-esl-api .
 docker run --env-file .env -p 4000:4000 -p 1883:1883 kersen-esl-api
 ```
 
+## 一键快速部署 EC2
+
+如果你不想在 AWS 控制台一个个点击创建，先用快速部署脚本：
+
+```bash
+aws configure
+AWS_REGION=ap-east-1 bash infra/aws-ec2-quickstart.sh
+```
+
+脚本会自动完成：
+
+- 创建 SSH key pair，保存到 `.aws-quickstart/`
+- 创建安全组，开放 `22`、`80`、`4000`、`1883`
+- 创建 Amazon Linux 2023 EC2
+- 安装 Docker 和 Docker Compose
+- 上传当前项目
+- 自动生成生产环境变量 `.env.aws`
+- 启动 `infra/docker-compose.ec2.yml`
+
+部署完成后会输出：
+
+```text
+控制台: http://EC2_PUBLIC_IP
+API:    http://EC2_PUBLIC_IP:4000
+健康:   http://EC2_PUBLIC_IP:4000/ready
+基站服务器地址填写: http://EC2_PUBLIC_IP:4000
+```
+
+停止并删除这台快速部署 EC2：
+
+```bash
+AWS_REGION=ap-east-1 bash infra/aws-ec2-destroy.sh
+```
+
+注意：这个快速部署方案把 Postgres 和 Redis 都跑在同一台 EC2 上，适合先跑通和小规模试用。正式长期生产建议迁移到 RDS PostgreSQL + ElastiCache Redis + EFS/S3。
+
 完整本地容器运行：
 
 ```bash

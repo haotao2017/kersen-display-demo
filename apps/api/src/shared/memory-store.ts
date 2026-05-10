@@ -38,6 +38,7 @@ export class MemoryStore implements OnModuleInit {
       id: id('store'),
       code: storeCode,
       name: 'Default ESL Store',
+      address: '',
       username: 'admin',
       passwordHash,
       serverUrl: process.env.PUBLIC_SERVER_URL ?? 'http://localhost:4000',

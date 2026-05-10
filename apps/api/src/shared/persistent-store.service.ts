@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
 import { BaseStation, Label, StoreConfig } from './models';
 
 type JsonRow = Record<string, unknown>;
@@ -19,7 +20,9 @@ export class PersistentStoreService implements OnModuleDestroy {
       return;
     }
 
+    const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
     this.prisma = new PrismaClient({
+      adapter,
       log: process.env.PRISMA_QUERY_LOG === 'true' ? ['warn', 'error', 'query'] : ['warn', 'error'],
     });
   }
@@ -68,6 +71,7 @@ export class PersistentStoreService implements OnModuleDestroy {
           id: item.id,
           code: item.code,
           name: item.name,
+          address: item.address ?? '',
           username: item.username,
           passwordHash: item.passwordHash,
           serverUrl: item.serverUrl ?? '',
@@ -192,6 +196,7 @@ export class PersistentStoreService implements OnModuleDestroy {
       await this.prisma.$transaction(async (tx) => {
         const storeCodes = snapshot.stores.map((item) => item.code);
         const apIds = snapshot.baseStations.map((item) => item.id);
+        const apIdSet = new Set(apIds);
         const labelIds = snapshot.labels.map((item) => item.id);
         const productIds = snapshot.cloudProducts.map((item) => stringValue(item.id)).filter(Boolean);
         const templateIds = snapshot.cloudTemplates.map((item) => stringValue(item.id)).filter(Boolean);
@@ -203,6 +208,7 @@ export class PersistentStoreService implements OnModuleDestroy {
             update: {
               id: store.id,
               name: store.name,
+              address: store.address ?? '',
               username: store.username,
               passwordHash: store.passwordHash,
               serverUrl: store.serverUrl,
@@ -214,6 +220,7 @@ export class PersistentStoreService implements OnModuleDestroy {
               id: store.id,
               code: store.code,
               name: store.name,
+              address: store.address ?? '',
               username: store.username,
               passwordHash: store.passwordHash,
               serverUrl: store.serverUrl,
@@ -284,16 +291,16 @@ export class PersistentStoreService implements OnModuleDestroy {
           const row = label as Label & JsonRow;
           await tx.label.upsert({
             where: { id: label.id },
-            update: labelInput(row),
-            create: labelInput(row),
+            update: labelInput(row, apIdSet),
+            create: labelInput(row, apIdSet),
           });
         }
 
         for (const task of snapshot.cloudTasks) {
           await tx.refreshTask.upsert({
             where: { id: stringValue(task.id) },
-            update: refreshTaskInput(task),
-            create: refreshTaskInput(task),
+            update: refreshTaskInput(task, apIdSet),
+            create: refreshTaskInput(task, apIdSet),
           });
         }
 
@@ -385,12 +392,20 @@ function templateInput(row: JsonRow) {
   };
 }
 
-function labelInput(row: Label & JsonRow) {
+function relationId(value: unknown, validIds?: Set<string>) {
+  const id = value == null || value === '' ? '' : String(value);
+  if (!id) {
+    return null;
+  }
+  return validIds && !validIds.has(id) ? null : id;
+}
+
+function labelInput(row: Label & JsonRow, validApIds?: Set<string>) {
   const timestamp = toDate(row.updatedAt ?? row.createdAt);
   return {
     id: row.id,
     storeCode: row.storeCode,
-    apId: row.apId ?? null,
+    apId: relationId(row.apId, validApIds),
     sku: row.sku ?? null,
     title: row.title,
     price: numberValue(row.price, 0),
@@ -409,14 +424,14 @@ function labelInput(row: Label & JsonRow) {
   };
 }
 
-function refreshTaskInput(row: JsonRow) {
+function refreshTaskInput(row: JsonRow, validApIds?: Set<string>) {
   const timestamp = toDate(row.updatedAt ?? row.createdAt);
   return {
     id: stringValue(row.id),
     storeCode: storeCodeOf(row),
     taskType: stringValue(row.taskType, 'refresh'),
     eslDeviceId: stringValue(row.eslDeviceId),
-    apId: row.apId == null || row.apId === '' ? null : String(row.apId),
+    apId: relationId(row.apId, validApIds),
     productId: row.productId == null || row.productId === '' ? null : String(row.productId),
     templateId: row.templateId == null || row.templateId === '' ? null : String(row.templateId),
     payload: toJson(row.payload ?? {}),

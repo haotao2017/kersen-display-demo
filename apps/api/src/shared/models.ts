@@ -6,6 +6,7 @@ export interface StoreConfig {
   id: string;
   code: string;
   name: string;
+  address?: string;
   username: string;
   passwordHash: string;
   serverUrl: string;

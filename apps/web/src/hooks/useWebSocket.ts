@@ -3,24 +3,29 @@ import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { EVENTS_URL, queryKeys } from '../utils/constants';
 import { useAppStore } from '../app/store';
+import { useI18n } from '../i18n';
+import { getTaskUserText } from '../utils/taskText';
 
 const NOTICEABLE_EVENT_TYPES = new Set(['ap.offline', 'task.failed']);
 const AP_REFRESH_EVENT_TYPES = new Set(['ap.online', 'ap.offline', 'ap.updated']);
 const TASK_REFRESH_EVENT_TYPES = new Set(['task.created', 'task.updated', 'task.success', 'task.failed']);
 const DEVICE_REFRESH_EVENT_TYPES = new Set(['esl.bound', 'esl.unbound', 'esl.updated', 'esl.adjusted']);
 
-function buildNotificationContent(payload: { type: string; data?: Record<string, unknown> }) {
+function buildNotificationContent(payload: { type: string; data?: Record<string, unknown> }, tx: (zh: string, en: string) => string) {
   if (payload.type === 'ap.offline') {
     return {
-      message: '基站离线',
-      description: `${payload.data?.apCode ?? '未知基站'} 已离线`,
+      message: tx('基站离线', 'Station offline'),
+      description: tx(
+        `${payload.data?.apCode ?? '未知基站'} 已离线`,
+        `${payload.data?.apCode ?? 'Unknown station'} is offline`,
+      ),
     };
   }
 
   if (payload.type === 'task.failed') {
     return {
-      message: '任务失败',
-      description: `${payload.data?.taskType ?? '未知任务'} 执行失败`,
+      message: tx('任务失败', 'Task failed'),
+      description: getTaskUserText({ ...payload.data, status: 'failed' }, tx),
     };
   }
 
@@ -32,6 +37,7 @@ function buildNotificationContent(payload: { type: string; data?: Record<string,
 
 export const useWebSocket = () => {
   const { notification } = App.useApp();
+  const { language, tx } = useI18n();
   const queryClient = useQueryClient();
   const setWsConnected = useAppStore((state) => state.setWsConnected);
 
@@ -43,7 +49,7 @@ export const useWebSocket = () => {
     const handler = (event: MessageEvent) => {
       const payload = JSON.parse(event.data);
       if (NOTICEABLE_EVENT_TYPES.has(payload.type)) {
-        const content = buildNotificationContent(payload);
+        const content = buildNotificationContent(payload, tx);
         notification.warning({
           ...content,
           placement: 'bottomRight',
@@ -69,5 +75,5 @@ export const useWebSocket = () => {
     );
 
     return () => source.close();
-  }, [queryClient, setWsConnected]);
+  }, [queryClient, setWsConnected, language]);
 };

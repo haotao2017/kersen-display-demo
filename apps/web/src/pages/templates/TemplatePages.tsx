@@ -15,18 +15,28 @@ import { generateId } from '../../utils/id';
 
 const SAMPLE_IMAGE_URL = 'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=640&q=80';
 const ESL_SCREEN_PRESETS = [
-  { id: 'esl-03-128x250', width: 250, height: 128, colorMode: 'bwry' as const },
-  { id: 'esl-03-02-128x296', width: 296, height: 128, colorMode: 'bwry' as const },
-  { id: 'esl-03-02-152x296', width: 296, height: 152, colorMode: 'bwry' as const },
-  { id: 'esl-03-02-200x200', width: 200, height: 200, colorMode: 'bwry' as const },
-  { id: 'esl-03-04-240x416', width: 416, height: 240, colorMode: 'bwry' as const },
-  { id: 'esl-03-03-184x384', width: 384, height: 184, colorMode: 'bwry' as const },
-  { id: 'esl-03-04-400x300', width: 400, height: 300, colorMode: 'bwry' as const },
-  { id: 'esl-03-0a-648x480', width: 648, height: 480, colorMode: 'bwry' as const },
-  { id: 'esl-0c-800x480', width: 800, height: 480, colorMode: 'bwry' as const },
+  { id: 'esl-03-128x250', width: 250, height: 128, inch: '2.13', colorMode: 'bwry' as const },
+  { id: 'esl-03-02-128x296', width: 296, height: 128, inch: '2.9', colorMode: 'bwry' as const },
+  { id: 'esl-03-02-152x296', width: 296, height: 152, inch: '2.66', colorMode: 'bwry' as const },
+  { id: 'esl-03-02-200x200', width: 200, height: 200, inch: '1.54', colorMode: 'bwry' as const },
+  { id: 'esl-03-04-240x416', width: 416, height: 240, inch: '3.7', colorMode: 'bwry' as const },
+  { id: 'esl-03-03-184x384', width: 384, height: 184, inch: '4.2', colorMode: 'bwry' as const },
+  { id: 'esl-03-04-400x300', width: 400, height: 300, inch: '4.2', colorMode: 'bwry' as const },
+  { id: 'esl-03-0a-648x480', width: 648, height: 480, inch: '5.83', colorMode: 'bwry' as const },
+  { id: 'esl-0c-800x480', width: 800, height: 480, inch: '7.5', colorMode: 'bwry' as const },
 ];
 const DEFAULT_SCREEN_PRESET = ESL_SCREEN_PRESETS.find((item) => item.id === 'esl-03-02-152x296') ?? ESL_SCREEN_PRESETS[0];
-const formatScreenSize = (preset: Pick<typeof ESL_SCREEN_PRESETS[number], 'width' | 'height'>) => `${preset.width}×${preset.height}`;
+const formatScreenSize = (preset: Pick<typeof ESL_SCREEN_PRESETS[number], 'width' | 'height'> & { inch?: string }) => (
+  preset.inch ? `${preset.inch}" · ${preset.width}×${preset.height}` : `${preset.width}×${preset.height}`
+);
+const formatTemplateScreenSize = (value?: { deviceType?: unknown; width?: unknown; height?: unknown } | null) => {
+  const preset = findScreenPreset(value);
+  return formatScreenSize({
+    inch: preset.inch,
+    width: Number(value?.width ?? preset.width),
+    height: Number(value?.height ?? preset.height),
+  });
+};
 const SCREEN_PRESET_OPTIONS = Array.from(
   new Map(ESL_SCREEN_PRESETS.map((item) => [`${item.width}x${item.height}`, item])).values(),
 ).map((item) => ({ label: formatScreenSize(item), value: item.id }));
@@ -533,9 +543,16 @@ const getDesignerQrMatrix = (text: string, size = 21) => {
 const resolveDesignerAssetUrl = (value?: string | null) => {
   const trimmed = String(value ?? '').trim();
   if (!trimmed) return '';
-  if (trimmed.startsWith('data:image/') || /^https?:\/\//i.test(trimmed)) return trimmed;
+  if (trimmed.startsWith('data:image/') || trimmed.startsWith('blob:') || /^https?:\/\//i.test(trimmed)) return trimmed;
   const normalizedPath = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
-  return new URL(normalizedPath, API_BASE_URL).toString();
+  const baseUrl = new URL(API_BASE_URL, window.location.origin);
+  return new URL(normalizedPath, baseUrl).toString();
+};
+
+const getImageElementSource = (element: TemplateElement) => {
+  const explicitImageUrl = typeof element.imageUrl === 'string' ? element.imageUrl.trim() : '';
+  const expression = typeof element.expression === 'string' ? element.expression.trim() : '';
+  return explicitImageUrl || expression;
 };
 
 const loadCanvasImage = (src?: string | null) =>
@@ -608,9 +625,9 @@ const DesignerElementNode = ({
       setImage(null);
       return;
     }
-    const imageUrl = String(element.expression ?? '').trim();
+    const imageUrl = getImageElementSource(element);
     void loadCanvasImage(imageUrl).then(setImage);
-  }, [element.type, element.expression]);
+  }, [element.type, element.expression, element.imageUrl]);
 
   useEffect(() => {
     onNodeReady(element.id, node ?? null);
@@ -914,6 +931,7 @@ export const TemplateListPage = () => {
               ),
             },
             { title: tx('名称', 'Name'), dataIndex: 'name' },
+            { title: tx('屏幕规格', 'Screen Size'), render: (_, row: any) => formatTemplateScreenSize(row) },
             { title: tx('编码', 'Code'), dataIndex: 'code' },
             { title: tx('版本', 'Version'), dataIndex: 'version' },
             { title: tx('状态', 'Status'), dataIndex: 'status' },
@@ -1273,7 +1291,8 @@ export const TemplateDesignerPage = () => {
       }
       try {
         const result = await uploadPreviewImage.mutateAsync(file as File);
-        updateElement(selectedElement.id, { expression: result.url });
+        const imageUrl = resolveDesignerAssetUrl(result.url);
+        updateElement(selectedElement.id, { expression: result.url, imageUrl });
         globalMessage.success(tx('模板预览图片已上传', 'Template preview image uploaded'));
         onSuccess?.(result);
       } catch (error) {
@@ -1311,8 +1330,9 @@ export const TemplateDesignerPage = () => {
     const sanitizedSchema = sanitizeDesignerSchema(sizedSchema);
     const nextElements = (sanitizedSchema.elements ?? []).map((item: any) => {
       if (item.type !== 'image') return item;
-      const resolvedExpression = resolveDesignerAssetUrl(item.expression);
-      return resolvedExpression ? { ...item, expression: resolvedExpression } : item;
+      const source = getImageElementSource(item);
+      const resolvedImageUrl = resolveDesignerAssetUrl(source);
+      return resolvedImageUrl ? { ...item, imageUrl: resolvedImageUrl } : item;
     });
     setSchema({ ...sanitizedSchema, elements: nextElements });
   }, [data, templateDetail?.width, templateDetail?.height, setSchema]);
@@ -2077,7 +2097,7 @@ export const TemplateDesignerPage = () => {
                     {selectedElement.type === 'image' ? (
                       <Form.Item label={tx('图片预览地址', 'Preview Image URL')}>
                         <Input
-                          value={typeof selectedElement.expression === 'string' ? selectedElement.expression : ''}
+                          value={getImageElementSource(selectedElement)}
                           addonAfter={(
                             <Upload {...previewUploadProps}>
                               <Button size="small" loading={uploadPreviewImage.isPending}>
@@ -2085,7 +2105,7 @@ export const TemplateDesignerPage = () => {
                               </Button>
                             </Upload>
                           )}
-                          onChange={(event) => updateElement(selectedElement.id, { expression: event.target.value })}
+                          onChange={(event) => updateElement(selectedElement.id, { expression: event.target.value, imageUrl: resolveDesignerAssetUrl(event.target.value) })}
                           placeholder={tx('设计器预览底图，实际渲染优先使用商品图片', 'Used only for designer preview. Real rendering prefers the product image.')}
                         />
                       </Form.Item>

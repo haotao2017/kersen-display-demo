@@ -16,10 +16,12 @@ export const EslDeviceListPage = () => {
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
   const [bindForm] = Form.useForm();
-  const { data, isPending } = useQuery({ queryKey: queryKeys.devices, queryFn: () => api.devices({}), refetchInterval: 10_000 });
+  const [filters, setFilters] = useState<{ storeCode?: string; apId?: string; keyword?: string }>({});
+  const { data, isPending } = useQuery({ queryKey: [...queryKeys.devices, filters], queryFn: () => api.devices(filters), refetchInterval: 10_000 });
   const { data: products } = useQuery({ queryKey: queryKeys.products, queryFn: () => api.products({}) });
   const { data: templates } = useQuery({ queryKey: queryKeys.templates, queryFn: () => api.templates({}) });
   const { data: aps } = useQuery({ queryKey: queryKeys.aps, queryFn: () => api.aps({}), refetchInterval: 10_000 });
+  const { data: stores } = useQuery({ queryKey: queryKeys.stores, queryFn: () => api.stores({}), refetchInterval: 10_000 });
   const create = useMutation({
     mutationFn: api.createDevice,
     onSuccess: () => {
@@ -63,12 +65,15 @@ export const EslDeviceListPage = () => {
   });
   const silentWake = useMutation({
     mutationFn: ({ id, apId }: { id: string; apId?: string }) => api.silentWakeDevice(id, { apId, waitMs: 8000 }),
-    onSuccess: (result) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.devices });
-      message.success(result.conclusion ?? tx('已提交无感唤醒', 'Silent wake submitted'));
+      message.success(tx('已提交唤醒请求', 'Wake request submitted'));
     },
     onError: (error: any) => {
-      message.error(error?.userMessage ?? error?.message ?? tx('无感唤醒失败', 'Silent wake failed'));
+      const raw = String(error?.userMessage ?? error?.message ?? '');
+      message.error(raw.includes('没有可用') || raw.includes('no_online_ap')
+        ? tx('没有可用基站，唤醒未发送。', 'No available station. Wake request was not sent.')
+        : tx('唤醒失败，请稍后重试。', 'Wake request failed. Please retry later.'));
     },
   });
   const unbind = useMutation({
@@ -81,10 +86,37 @@ export const EslDeviceListPage = () => {
   });
   const productOptions = useMemo(() => (products?.items ?? []).map((item: any) => ({ label: item.name, value: item.id })), [products]);
   const templateOptions = useMemo(() => (templates?.items ?? []).map((item: any) => ({ label: item.name, value: item.id })), [templates]);
-  const apOptions = useMemo(() => (aps?.items ?? []).map((item: any) => ({ label: `${item.apCode} / ${item.name}`, value: item.id })), [aps]);
+  const storeOptions = useMemo(() => (stores?.items ?? []).map((item: any) => ({ label: `${item.name} / ${item.code}`, value: item.code })), [stores]);
+  const apOptions = useMemo(() => (aps?.items ?? [])
+    .filter((item: any) => !filters.storeCode || item.storeCode === filters.storeCode)
+    .map((item: any) => ({ label: `${item.storeName ?? item.storeCode} / ${item.apCode} / ${item.name}`, value: item.id })), [aps, filters.storeCode]);
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
       <Card title={tx('显示节点', 'Display Nodes')} extra={<Button type="primary" onClick={() => setCreateOpen(true)}>{tx('手动添加节点', 'Add Display Node')}</Button>}>
+        <Space wrap style={{ marginBottom: 16 }}>
+          <Select
+            allowClear
+            placeholder={tx('按门店筛选', 'Filter by store')}
+            style={{ width: 220 }}
+            options={storeOptions}
+            value={filters.storeCode}
+            onChange={(storeCode) => setFilters((current) => ({ ...current, storeCode, apId: undefined }))}
+          />
+          <Select
+            allowClear
+            placeholder={tx('按基站筛选', 'Filter by AP')}
+            style={{ width: 260 }}
+            options={apOptions}
+            value={filters.apId}
+            onChange={(apId) => setFilters((current) => ({ ...current, apId }))}
+          />
+          <Input.Search
+            allowClear
+            placeholder={tx('搜索标签码/名称', 'Search label code/name')}
+            style={{ width: 260 }}
+            onSearch={(keyword) => setFilters((current) => ({ ...current, keyword: keyword.trim() || undefined }))}
+          />
+        </Space>
         <Table
           rowKey="id"
           loading={isPending}
@@ -92,6 +124,7 @@ export const EslDeviceListPage = () => {
           columns={[
             { title: tx('设备名称', 'Device Name'), render: (_, row: any) => row.name ?? row.eslCode ?? '-' },
             { title: tx('设备码', 'Device Code'), dataIndex: 'eslCode' },
+            { title: tx('门店', 'Store'), render: (_, row: any) => row.ap?.storeName ?? row.storeCode ?? '-' },
             { title: 'AP', render: (_, row: any) => row.ap?.name ?? row.ap?.apCode ?? '-' },
             {
               title: tx('绑定状态', 'Binding'),
