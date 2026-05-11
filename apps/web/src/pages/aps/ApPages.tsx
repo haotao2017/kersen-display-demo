@@ -7,18 +7,23 @@ import { useAppStore } from '../../app/store';
 import { PageHeaderCard } from '../../components/common/PageHeaderCard';
 import { useI18n } from '../../i18n';
 import { queryKeys } from '../../utils/constants';
-import { buildTaskStatusLabels, getTaskUserText, normalizeTaskStatus } from '../../utils/taskText';
+import { getTaskStatusLabel, getTaskUserText } from '../../utils/taskText';
 
 export const ApListPage = () => {
   const { tx } = useI18n();
   const { message, modal } = App.useApp();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const currentUser = useAppStore((state) => state.user);
+  const isAdmin = currentUser?.role === 'ADMIN';
   const [form] = Form.useForm();
   const [open, setOpen] = useState(false);
-  const { data, isPending } = useQuery({ queryKey: queryKeys.aps, queryFn: () => api.aps({}), refetchInterval: 10_000 });
+  const [filters, setFilters] = useState<{ ownerUserId?: string; keyword?: string }>({});
+  const { data, isPending } = useQuery({ queryKey: [...queryKeys.aps, filters], queryFn: () => api.aps(filters), refetchInterval: 10_000 });
   const { data: stores } = useQuery({ queryKey: queryKeys.stores, queryFn: () => api.stores({}), refetchInterval: 10_000 });
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
   const storeOptions = useMemo(() => (stores?.items ?? []).map((item: any) => ({ label: `${item.name} / ${item.code}`, value: item.code })), [stores]);
+  const userOptions = useMemo(() => (users ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
   const create = useMutation({
     mutationFn: api.createAp,
     onSuccess: () => {
@@ -67,6 +72,26 @@ export const ApListPage = () => {
       >
         {tx('用于登记 eStation / AP 基站信息。当前仅监听已登记基站的主题，自动发现的价签会单独展示，不再直接算作正式绑定设备。', 'Register eStation / AP stations here. Only registered station topics are subscribed, and auto-discovered labels are shown separately instead of being counted as formally bound devices.')}
       </PageHeaderCard>
+      <Card>
+        <Space wrap>
+          {isAdmin ? (
+            <Select
+              allowClear
+              placeholder={tx('按用户筛选', 'Filter by user')}
+              style={{ width: 240 }}
+              options={userOptions}
+              value={filters.ownerUserId}
+              onChange={(ownerUserId) => setFilters((current) => ({ ...current, ownerUserId }))}
+            />
+          ) : null}
+          <Input.Search
+            allowClear
+            placeholder={tx('搜索基站编号/名称/门店', 'Search station code/name/store')}
+            style={{ width: 280 }}
+            onSearch={(keyword) => setFilters((current) => ({ ...current, keyword: keyword.trim() || undefined }))}
+          />
+        </Space>
+      </Card>
       <Collapse
         defaultActiveKey={(stores?.items ?? []).map((item: any) => item.code)}
         items={(stores?.items ?? []).map((store: any) => {
@@ -86,6 +111,7 @@ export const ApListPage = () => {
                 loading={isPending}
                 dataSource={rows}
                 columns={[
+                  ...(isAdmin ? [{ title: tx('归属账号', 'Owner'), render: (_: unknown, row: any) => row.owner?.displayName || row.owner?.username || row.ownerUserId || '-' }] : []),
                   { title: tx('AP 编码', 'AP Code'), dataIndex: 'apCode' },
                   { title: tx('名称', 'Name'), dataIndex: 'name' },
                   {
@@ -145,6 +171,7 @@ export const ApListPage = () => {
               mac: values.mac,
               firmwareVersion: values.firmwareVersion,
               location: values.location,
+              ownerUserId: values.ownerUserId,
               config: {
                 heartbeat: values.heartbeat,
                 channel: values.channel,
@@ -153,6 +180,11 @@ export const ApListPage = () => {
             })
           }
         >
+          {isAdmin ? (
+            <Form.Item name="ownerUserId" label={tx('归属账号', 'Owner')}>
+              <Select allowClear options={userOptions} placeholder={tx('默认当前账号', 'Default to current user')} />
+            </Form.Item>
+          ) : null}
           <Form.Item name="storeCode" label={tx('所属门店', 'Store')} rules={[{ required: true, message: tx('请选择门店', 'Select a store') }]}>
             <Select options={storeOptions} placeholder={tx('请选择门店', 'Select a store')} />
           </Form.Item>
@@ -200,7 +232,6 @@ export const ApListPage = () => {
 
 export const ApDetailPage = () => {
   const { tx } = useI18n();
-  const TASK_STATUS_LABELS = buildTaskStatusLabels(tx);
   const { message } = App.useApp();
   const { id = '' } = useParams();
   const queryClient = useQueryClient();
@@ -361,7 +392,7 @@ export const ApDetailPage = () => {
             { key: 'ip', label: 'IP', children: summary?.ip ?? '-' },
             { key: 'mac', label: 'MAC', children: summary?.mac ?? '-' },
             { key: 'firmwareVersion', label: tx('固件版本', 'Firmware'), children: summary?.firmwareVersion ?? '-' },
-            { key: 'deviceCount', label: tx('已绑定商品设备', 'Bound Product Devices'), children: summary?.boundDevices?.length ?? summary?.devices?.length ?? 0 },
+            { key: 'deviceCount', label: tx('已绑定商品设备', 'Bound Product Devices'), children: summary?.boundDeviceCount ?? summary?.boundDevices?.length ?? summary?.devices?.length ?? 0 },
             { key: 'discoveredCount', label: tx('自动发现设备', 'Discovered Devices'), children: summary?.discoveredDevices?.length ?? summary?.discoveredDeviceCount ?? 0 },
             { key: 'lastOnlineAt', label: tx('最后在线', 'Last Online'), children: summary?.lastOnlineAt ?? '-' },
             { key: 'lastHeartbeatAt', label: tx('最后心跳', 'Last Heartbeat'), children: summary?.lastHeartbeatAt ?? '-' },
@@ -425,7 +456,7 @@ export const ApDetailPage = () => {
           pagination={false}
           columns={[
             { title: tx('任务类型', 'Task Type'), dataIndex: 'taskType' },
-            { title: tx('状态', 'Status'), render: (_, row: any) => TASK_STATUS_LABELS[normalizeTaskStatus(row.status)] ?? row.status },
+            { title: tx('状态', 'Status'), render: (_, row: any) => getTaskStatusLabel(row, tx) },
             { title: tx('结果', 'Result'), render: (_, row: any) => getTaskUserText(row, tx) },
             { title: tx('更新时间', 'Updated At'), dataIndex: 'updatedAt' },
           ]}
@@ -488,7 +519,7 @@ export const ApDetailPage = () => {
         <Space style={{ width: '100%' }}>
           <Popconfirm
             title={tx('确认删除这个基站？', 'Delete this station?')}
-            description={tx('若仍有关联设备，请先解绑。', 'If devices are still linked, unbind them first.')}
+            description={tx('删除基站会解除相关标签与该基站的绑定，但不会删除标签、模板或商品数据。', 'Deleting the station clears related label bindings to this AP, but keeps label, template, and product data.')}
             onConfirm={() => remove.mutate(id)}
           >
             <Button danger loading={remove.isPending}>

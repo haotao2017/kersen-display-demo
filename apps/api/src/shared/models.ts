@@ -7,6 +7,7 @@ export interface StoreConfig {
   code: string;
   name: string;
   address?: string;
+  ownerUserId?: string | null;
   username: string;
   passwordHash: string;
   serverUrl: string;
@@ -19,6 +20,7 @@ export interface StoreConfig {
 export interface BaseStation {
   id: string;
   storeCode: string;
+  ownerUserId?: string | null;
   name: string;
   mac?: string;
   ip?: string;
@@ -49,6 +51,7 @@ export interface BaseStation {
 export interface Label {
   id: string;
   storeCode: string;
+  ownerUserId?: string | null;
   apId?: string;
   sku?: string;
   title: string;
@@ -64,6 +67,7 @@ export interface Label {
 export interface EslCommand {
   id: string;
   storeCode: string;
+  ownerUserId?: string | null;
   targetType: 'ap' | 'label';
   targetId: string;
   type: 'refresh_label' | 'bind_label' | 'reboot_ap' | 'raw';

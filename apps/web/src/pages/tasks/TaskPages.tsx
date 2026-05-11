@@ -1,13 +1,15 @@
-import { Alert, App, Button, Card, Descriptions, Divider, Drawer, Modal, Space, Table, Tag, Typography } from 'antd';
+import { Alert, App, Button, Card, Descriptions, Divider, Drawer, Input, Modal, Select, Space, Table, Tag, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import dayjs from 'dayjs';
 import { api } from '../../api';
+import { useAppStore } from '../../app/store';
 import { useI18n } from '../../i18n';
 import { queryKeys } from '../../utils/constants';
-import { buildTaskStatusLabels, buildTaskTypeLabels, getTaskProgressText, getTaskSummary, getTaskUserText, normalizeTaskStatus } from '../../utils/taskText';
+import { buildTaskStatusLabels, buildTaskTypeLabels, getTaskProgressText, getTaskStatusLabel, getTaskSummary, getTaskUserText, normalizeTaskStatus } from '../../utils/taskText';
 
 const formatDateTime = (value?: string | null) => (value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-');
+const DEFAULT_PAGE_SIZE = 50;
 
 export const TaskListPage = () => {
   const { tx } = useI18n();
@@ -16,7 +18,22 @@ export const TaskListPage = () => {
   const { message } = App.useApp();
   const queryClient = useQueryClient();
   const [taskId, setTaskId] = useState<string | null>(null);
-  const { data, isPending } = useQuery({ queryKey: queryKeys.tasks, queryFn: () => api.tasks({}), refetchInterval: 3000 });
+  const currentUser = useAppStore((state) => state.user);
+  const isAdmin = currentUser?.role === 'ADMIN';
+  const [filters, setFilters] = useState<{ ownerUserId?: string; keyword?: string }>({});
+  const [pagination, setPagination] = useState({ current: 1, pageSize: DEFAULT_PAGE_SIZE });
+  const updateFilters = (patch: Partial<typeof filters>) => {
+    setPagination((current) => ({ ...current, current: 1 }));
+    setFilters((current) => ({ ...current, ...patch }));
+  };
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
+  const userOptions = (users ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id }));
+  const { data, isPending } = useQuery({
+    queryKey: [...queryKeys.tasks, filters, pagination],
+    queryFn: () => api.tasks({ ...filters, page: pagination.current, pageSize: pagination.pageSize }),
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  });
   const { data: detail, isPending: isDetailPending } = useQuery({
     queryKey: taskId ? queryKeys.task(taskId) : ['task-empty'],
     queryFn: () => api.task(taskId!),
@@ -48,17 +65,48 @@ export const TaskListPage = () => {
   return (
     <>
       <Card title={tx('任务中心', 'Tasks')}>
+        <Space wrap style={{ marginBottom: 16 }}>
+          {isAdmin ? (
+            <Select
+              allowClear
+              placeholder={tx('按用户筛选', 'Filter by user')}
+              style={{ width: 240 }}
+              options={userOptions}
+              value={filters.ownerUserId}
+              onChange={(ownerUserId) => updateFilters({ ownerUserId })}
+            />
+          ) : null}
+          <Input.Search
+            allowClear
+            placeholder={tx('搜索任务/标签/基站/结果', 'Search task/label/station/result')}
+            style={{ width: 280 }}
+            onSearch={(keyword) => updateFilters({ keyword: keyword.trim() || undefined })}
+          />
+        </Space>
         <Table
           rowKey="id"
           loading={isPending}
           dataSource={data?.items ?? []}
+          pagination={{
+            current: data?.page ?? pagination.current,
+            pageSize: data?.pageSize ?? pagination.pageSize,
+            total: data?.total ?? 0,
+            showSizeChanger: true,
+            pageSizeOptions: [20, 50, 100, 200],
+            showTotal: (total) => tx(`共 ${total} 条`, `${total} total`),
+          }}
+          onChange={(next) => setPagination({
+            current: next.current ?? 1,
+            pageSize: next.pageSize ?? DEFAULT_PAGE_SIZE,
+          })}
           columns={[
+            ...(isAdmin ? [{ title: tx('归属账号', 'Owner'), render: (_: unknown, row: any) => row.owner?.displayName || row.owner?.username || row.ownerUserId || '-' }] : []),
             { title: tx('任务 ID', 'Task ID'), dataIndex: 'id' },
             { title: tx('类型', 'Type'), render: (_, row: any) => TASK_TYPE_LABELS[String(row.taskType ?? '')] ?? row.taskType },
             { title: tx('数据源', 'Data Source'), render: (_, row: any) => row.product?.name ?? '-' },
             { title: tx('显示节点', 'Display Node'), render: (_, row: any) => row.eslDevice?.eslCode ?? '-' },
             { title: tx('AP 基站', 'AP Station'), render: (_, row: any) => row.ap?.name ?? '-' },
-            { title: tx('状态', 'Status'), render: (_, row: any) => TASK_STATUS_LABELS[normalizeTaskStatus(row.status)] ?? row.status },
+            { title: tx('状态', 'Status'), render: (_, row: any) => getTaskStatusLabel(row, tx) },
             { title: tx('触发时间', 'Triggered At'), render: (_, row: any) => formatDateTime(row.triggeredAt ?? row.createdAt) },
             { title: tx('重试次数', 'Retries'), dataIndex: 'retryCount' },
             { title: tx('结果', 'Result'), render: (_, row: any) => getTaskUserText(row, tx) },
@@ -154,7 +202,7 @@ export const TaskListPage = () => {
               dataSource={detail?.events ?? []}
               columns={[
                 { title: tx('时间', 'Time'), dataIndex: 'time', render: (value) => formatDateTime(value) },
-                { title: tx('状态', 'Status'), dataIndex: 'status' },
+                { title: tx('状态', 'Status'), render: (_, row: any) => getTaskStatusLabel({ ...detail, status: row.status, resultMsg: row.message }, tx) },
                 { title: tx('说明', 'Message'), render: (_, row: any) => getTaskUserText({ ...detail, status: row.status, resultMsg: row.message }, tx) },
                 {
                   title: tx('回包', 'Reply'),
@@ -197,7 +245,7 @@ export const TaskListPage = () => {
                         columns={[
                           { title: tx('时间', 'Time'), render: (_, row: any) => formatDateTime(row.createdAt) },
                           { title: tx('触发时间', 'Triggered At'), render: (_, row: any) => formatDateTime(row.triggeredAt ?? row.createdAt) },
-                          { title: tx('状态', 'Status'), render: (_, row: any) => TASK_STATUS_LABELS[normalizeTaskStatus(row.status)] ?? row.status },
+                          { title: tx('状态', 'Status'), render: (_, row: any) => getTaskStatusLabel(row, tx) },
                           { title: tx('结果', 'Result'), render: (_, row: any) => getTaskUserText(row, tx) },
                         ]}
                       />

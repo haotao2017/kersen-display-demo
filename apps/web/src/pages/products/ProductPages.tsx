@@ -1,10 +1,11 @@
 import { DownOutlined } from '@ant-design/icons';
-import { App, Button, Card, Dropdown, Form, Image, Input, InputNumber, Select, Space, Table, Tag, Upload, Typography } from 'antd';
+import { App, Button, Card, Dropdown, Form, Image, Input, InputNumber, Modal, Select, Space, Table, Tag, Upload, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { UploadProps } from 'antd';
 import { api, type ProductRefreshResult, type ProductUpdateResult } from '../../api';
+import { useAppStore } from '../../app/store';
 import { PageHeaderCard } from '../../components/common/PageHeaderCard';
 import { useI18n } from '../../i18n';
 import { queryKeys } from '../../utils/constants';
@@ -77,7 +78,12 @@ export const ProductListPage = () => {
   const { message } = App.useApp();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { data, isPending } = useQuery({ queryKey: queryKeys.products, queryFn: () => api.products({}) });
+  const currentUser = useAppStore((state) => state.user);
+  const isAdmin = currentUser?.role === 'ADMIN';
+  const [filters, setFilters] = useState<{ ownerUserId?: string; keyword?: string }>({});
+  const { data, isPending } = useQuery({ queryKey: [...queryKeys.products, filters], queryFn: () => api.products(filters) });
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
+  const userOptions = useMemo(() => (users ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
   const refresh = useMutation({
     mutationFn: api.refreshProduct,
     onSuccess: (result: ProductRefreshResult) => {
@@ -98,16 +104,49 @@ export const ProductListPage = () => {
       }
     },
   });
+  const remove = useMutation({
+    mutationFn: api.deleteProduct,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.products });
+      queryClient.invalidateQueries({ queryKey: queryKeys.devices });
+      queryClient.invalidateQueries({ queryKey: queryKeys.tasks });
+      message.success(tx('数据源已删除', 'Data source deleted'));
+    },
+    onError: (error: any) => message.error(error?.response?.data?.message ?? tx('删除数据源失败', 'Failed to delete data source')),
+  });
+  const describeProductImpact = (row: any) => tx(
+    `删除后只删除这个数据源，并解除 ${row.bindDeviceCount ?? 0} 个显示节点与它的绑定；不会删除显示节点、模板或任务记录。`,
+    `This deletes only this data source and clears bindings from ${row.bindDeviceCount ?? 0} display node(s). Display nodes, templates, and task records are kept.`,
+  );
 
   return (
     <Space direction="vertical" style={{ width: '100%' }} size={16}>
       <PageHeaderCard title={tx('商品管理', 'Data Source')} extra={<Button type="primary" onClick={() => navigate('/products/create')}>{tx('新增商品', 'New Data Source')}</Button>} />
       <Card>
+        <Space wrap style={{ marginBottom: 16 }}>
+          {isAdmin ? (
+            <Select
+              allowClear
+              placeholder={tx('按用户筛选', 'Filter by user')}
+              style={{ width: 240 }}
+              options={userOptions}
+              value={filters.ownerUserId}
+              onChange={(ownerUserId) => setFilters((current) => ({ ...current, ownerUserId }))}
+            />
+          ) : null}
+          <Input.Search
+            allowClear
+            placeholder={tx('搜索名称/来源编号/参考值', 'Search name/source/reference')}
+            style={{ width: 280 }}
+            onSearch={(keyword) => setFilters((current) => ({ ...current, keyword: keyword.trim() || undefined }))}
+          />
+        </Space>
         <Table
           rowKey="id"
           loading={isPending}
           dataSource={data?.items ?? []}
           columns={[
+            ...(isAdmin ? [{ title: tx('归属账号', 'Owner'), render: (_: unknown, row: any) => row.owner?.displayName || row.owner?.username || row.ownerUserId || '-' }] : []),
             { title: tx('名称', 'Name'), dataIndex: 'name' },
             { title: tx('来源编号', 'Source ID'), dataIndex: 'sku' },
             { title: tx('参考值', 'Reference'), dataIndex: 'barcode' },
@@ -122,6 +161,23 @@ export const ProductListPage = () => {
                 <Space>
                   <Button onClick={() => navigate(`/products/${row.id}`)}>{tx('查看 / 编辑', 'View / Edit')}</Button>
                   <Button onClick={() => refresh.mutate(row.id)} loading={refresh.isPending && refresh.variables === row.id}>{tx('触发刷新', 'Refresh')}</Button>
+                  <Button
+                    danger
+                    loading={remove.isPending && remove.variables === row.id}
+                    onClick={() => {
+                      Modal.confirm({
+                        title: tx('删除数据源？', 'Delete data source?'),
+                        content: describeProductImpact(row),
+                        okText: tx('删除', 'Delete'),
+                        cancelText: tx('取消', 'Cancel'),
+                        okButtonProps: { danger: true },
+                        width: 620,
+                        onOk: () => remove.mutateAsync(row.id),
+                      });
+                    }}
+                  >
+                    {tx('删除', 'Delete')}
+                  </Button>
                 </Space>
               ),
             },
@@ -138,11 +194,14 @@ export const ProductFormPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const currentUser = useAppStore((state) => state.user);
+  const isAdmin = currentUser?.role === 'ADMIN';
   const [form] = Form.useForm();
   const isEdit = Boolean(id);
   const [visibleFieldKeys, setVisibleFieldKeys] = useState<string[]>(DEFAULT_CREATE_VISIBLE_FIELDS);
   const { data: detail, isPending: isDetailPending } = useQuery({ queryKey: id ? queryKeys.product(id) : ['product-create'], queryFn: () => api.product(id!), enabled: isEdit });
   const { data: templates } = useQuery({ queryKey: queryKeys.templates, queryFn: () => api.templates({}) });
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin && !isEdit });
   const mutation = useMutation({
     mutationFn: (values: any) => (isEdit ? api.updateProduct(id!, values) : api.createProduct(values)),
     onSuccess: (result: ProductUpdateResult | any) => {
@@ -187,6 +246,10 @@ export const ProductFormPage = () => {
   const templateOptions = useMemo(
     () => (templates?.items ?? []).map((item: any) => ({ label: item.name, value: item.id })),
     [templates],
+  );
+  const userOptions = useMemo(
+    () => (users ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })),
+    [users],
   );
 
   const uploadProps: UploadProps = {
@@ -306,6 +369,11 @@ export const ProductFormPage = () => {
       </PageHeaderCard>
       <Card loading={isEdit && isDetailPending}>
         <Form form={form} layout="vertical" initialValues={{ status: 'active', price: 0, customFields: {} }} onFinish={(values) => mutation.mutate(values)}>
+          {isAdmin && !isEdit ? (
+            <Form.Item name="ownerUserId" label={tx('归属账号', 'Owner')}>
+              <Select allowClear options={userOptions} placeholder={tx('默认当前账号', 'Default to current user')} />
+            </Form.Item>
+          ) : null}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 24 }}>
             {PRODUCT_FIELDS.filter((field) => visibleFieldKeys.includes(field.key)).map((field) => renderField(field))}
           </div>

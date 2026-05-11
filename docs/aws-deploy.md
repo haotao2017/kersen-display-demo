@@ -89,4 +89,4 @@ ESL_AP_REFRESH_CONCURRENCY=6
 ESL_AP_REFRESH_SLOT_HOLD_MS=30000
 ```
 
-注意：API 容器默认启动时执行 `prisma db push`，方便第一版部署；正式生产变更建议改为 CI/CD 里执行迁移，并设置 `PRISMA_DB_PUSH_ON_START=false`。
+注意：API 容器默认不再自动执行 `prisma db push`，避免发布时误改已有数据。确需同步数据库结构时，再临时设置 `PRISMA_DB_PUSH_ON_START=true` 后单独执行数据库同步。

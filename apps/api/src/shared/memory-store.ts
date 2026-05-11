@@ -5,12 +5,70 @@ import * as bcrypt from 'bcryptjs';
 import { BaseStation, EslCommand, Label, OfficialDownlinkCapture, RequestLog, StoreConfig } from './models';
 import { PersistentStoreService } from './persistent-store.service';
 
+type Row = Record<string, unknown>;
+
 const now = () => new Date().toISOString();
 const id = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 
+function stringValue(value: unknown, fallback = '') {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function normalizeRole(value: unknown, fallback = 'VIEWER') {
+  const role = stringValue(value, fallback).toUpperCase();
+  return role === 'ADMIN' || role === 'OPERATOR' || role === 'VIEWER' ? role : fallback;
+}
+
+function migrateLegacyOwners(data: {
+  stores?: StoreConfig[];
+  baseStations?: BaseStation[];
+  labels?: Label[];
+  cloudProducts?: Row[];
+  cloudTemplates?: Row[];
+  cloudTasks?: Row[];
+  users?: Row[];
+}) {
+  const stores = data.stores ?? [];
+  const baseStations = data.baseStations ?? [];
+  const labels = data.labels ?? [];
+  const products = data.cloudProducts ?? [];
+  const templates = data.cloudTemplates ?? [];
+  const tasks = data.cloudTasks ?? [];
+  const users = data.users ?? [];
+  const admin = users.find((user) => normalizeRole(user.role) === 'ADMIN' && String(user.username ?? '') === 'admin')
+    ?? users.find((user) => normalizeRole(user.role) === 'ADMIN')
+    ?? users[0];
+  const defaultOwnerId = String(admin?.id ?? '');
+  if (!defaultOwnerId) return;
+
+  stores.forEach((store) => {
+    const row = store as StoreConfig & Row;
+    row.ownerUserId = stringValue(row.ownerUserId, defaultOwnerId);
+  });
+  baseStations.forEach((ap) => {
+    const row = ap as BaseStation & Row;
+    row.ownerUserId = stringValue(row.ownerUserId, String((stores.find((store) => store.code === ap.storeCode) as Row | undefined)?.ownerUserId ?? defaultOwnerId));
+  });
+  labels.forEach((label) => {
+    const row = label as Label & Row;
+    const ap = label.apId ? baseStations.find((item) => item.id === label.apId) as Row | undefined : undefined;
+    row.ownerUserId = stringValue(row.ownerUserId, String(ap?.ownerUserId ?? (stores.find((store) => store.code === label.storeCode) as Row | undefined)?.ownerUserId ?? defaultOwnerId));
+  });
+  products.forEach((product) => {
+    product.ownerUserId = stringValue(product.ownerUserId, String((stores.find((store) => store.code === product.storeCode) as Row | undefined)?.ownerUserId ?? defaultOwnerId));
+  });
+  templates.forEach((template) => {
+    template.ownerUserId = stringValue(template.ownerUserId, String((stores.find((store) => store.code === template.storeCode) as Row | undefined)?.ownerUserId ?? defaultOwnerId));
+  });
+  tasks.forEach((task) => {
+    const label = labels.find((item) => item.id === task.eslDeviceId) as Row | undefined;
+    task.ownerUserId = stringValue(task.ownerUserId, String(label?.ownerUserId ?? defaultOwnerId));
+  });
+}
+
 @Injectable()
 export class MemoryStore implements OnModuleInit {
-  private readonly filePath = join(process.cwd(), 'data', 'store.json');
+  private readonly filePath = process.env.STORE_JSON_PATH || join(process.cwd(), 'data', 'store.json');
   private saveTimer?: ReturnType<typeof setTimeout>;
   private savingPersistent = false;
   private pendingPersistentSave = false;
@@ -21,6 +79,9 @@ export class MemoryStore implements OnModuleInit {
   readonly cloudProducts = new Map<string, Record<string, unknown>>();
   readonly cloudTemplates = new Map<string, Record<string, unknown>>();
   readonly cloudTasks = new Map<string, Record<string, unknown>>();
+  readonly users = new Map<string, Record<string, unknown>>();
+  readonly userInvites = new Map<string, Record<string, unknown>>();
+  readonly auditLogs: Array<Record<string, unknown>> = [];
   readonly requestLogs: RequestLog[] = [];
   readonly officialDownlinkCaptures: OfficialDownlinkCapture[] = [];
   readonly apSessions = new Map<string, { storeCode: string; apId: string; createdAt: string; source: 'local' | 'official' }>();
@@ -72,6 +133,15 @@ export class MemoryStore implements OnModuleInit {
       updatedAt: now(),
     });
 
+    migrateLegacyOwners({
+      stores: [...this.stores.values()],
+      baseStations: [...this.baseStations.values()],
+      labels: [...this.labels.values()],
+      cloudProducts: [...this.cloudProducts.values()],
+      cloudTemplates: [...this.cloudTemplates.values()],
+      cloudTasks: [...this.cloudTasks.values()],
+      users: [...this.users.values()],
+    });
     this.save();
   }
 
@@ -82,8 +152,9 @@ export class MemoryStore implements OnModuleInit {
     }
 
     if (snapshot.stores.length > 0) {
-      this.replaceFromSnapshot(snapshot);
+      this.mergeSnapshot(snapshot);
       this.saveJson();
+      this.queuePersistentSave();
       return;
     }
 
@@ -138,6 +209,9 @@ export class MemoryStore implements OnModuleInit {
           cloudProducts: [...this.cloudProducts.values()],
           cloudTemplates: [...this.cloudTemplates.values()],
           cloudTasks: [...this.cloudTasks.values()],
+          users: [...this.users.values()],
+          userInvites: [...this.userInvites.values()],
+          auditLogs: this.auditLogs,
           requestLogs: this.requestLogs,
           officialDownlinkCaptures: this.officialDownlinkCaptures,
         },
@@ -154,7 +228,7 @@ export class MemoryStore implements OnModuleInit {
     this.saveTimer = setTimeout(() => {
       this.saveTimer = undefined;
       void this.flushPersistentSave();
-    }, 500);
+    }, Math.max(500, Math.min(30_000, Number(process.env.PERSISTENT_SAVE_DEBOUNCE_MS ?? 5000))));
   }
 
   private async flushPersistentSave() {
@@ -192,6 +266,9 @@ export class MemoryStore implements OnModuleInit {
       cloudProducts?: Array<Record<string, unknown>>;
       cloudTemplates?: Array<Record<string, unknown>>;
       cloudTasks?: Array<Record<string, unknown>>;
+      users?: Array<Record<string, unknown>>;
+      userInvites?: Array<Record<string, unknown>>;
+      auditLogs?: Array<Record<string, unknown>>;
       requestLogs?: RequestLog[];
       officialDownlinkCaptures?: OfficialDownlinkCapture[];
     };
@@ -205,6 +282,7 @@ export class MemoryStore implements OnModuleInit {
       return false;
     }
 
+    migrateLegacyOwners(data);
     data.stores?.forEach((item) => this.stores.set(item.code, item));
     data.baseStations?.forEach((item) => this.baseStations.set(item.id, item));
     data.labels?.forEach((item) => this.labels.set(item.id, item));
@@ -212,6 +290,9 @@ export class MemoryStore implements OnModuleInit {
     data.cloudProducts?.forEach((item) => this.cloudProducts.set(String(item.id), item));
     data.cloudTemplates?.forEach((item) => this.cloudTemplates.set(String(item.id), item));
     data.cloudTasks?.forEach((item) => this.cloudTasks.set(String(item.id), item));
+    data.users?.forEach((item) => this.users.set(String(item.id), item));
+    data.userInvites?.forEach((item) => this.userInvites.set(String(item.id), item));
+    this.auditLogs.push(...(data.auditLogs ?? []));
     this.requestLogs.push(...(data.requestLogs ?? []));
     this.officialDownlinkCaptures.push(...(data.officialDownlinkCaptures ?? []));
     return true;
@@ -225,9 +306,13 @@ export class MemoryStore implements OnModuleInit {
     cloudProducts?: Array<Record<string, unknown>>;
     cloudTemplates?: Array<Record<string, unknown>>;
     cloudTasks?: Array<Record<string, unknown>>;
+    users?: Array<Record<string, unknown>>;
+    userInvites?: Array<Record<string, unknown>>;
+    auditLogs?: Array<Record<string, unknown>>;
     requestLogs?: RequestLog[];
     officialDownlinkCaptures?: OfficialDownlinkCapture[];
   }) {
+    migrateLegacyOwners(data);
     this.stores.clear();
     this.baseStations.clear();
     this.labels.clear();
@@ -235,6 +320,9 @@ export class MemoryStore implements OnModuleInit {
     this.cloudProducts.clear();
     this.cloudTemplates.clear();
     this.cloudTasks.clear();
+    this.users.clear();
+    this.userInvites.clear();
+    this.auditLogs.splice(0);
     this.requestLogs.splice(0);
     this.officialDownlinkCaptures.splice(0);
 
@@ -245,7 +333,87 @@ export class MemoryStore implements OnModuleInit {
     data.cloudProducts?.forEach((item) => this.cloudProducts.set(String(item.id), item));
     data.cloudTemplates?.forEach((item) => this.cloudTemplates.set(String(item.id), item));
     data.cloudTasks?.forEach((item) => this.cloudTasks.set(String(item.id), item));
+    data.users?.forEach((item) => this.users.set(String(item.id), item));
+    data.userInvites?.forEach((item) => this.userInvites.set(String(item.id), item));
+    this.auditLogs.push(...(data.auditLogs ?? []));
     this.requestLogs.push(...(data.requestLogs ?? []));
     this.officialDownlinkCaptures.push(...(data.officialDownlinkCaptures ?? []));
   }
+
+  private mergeSnapshot(data: {
+    stores?: StoreConfig[];
+    baseStations?: BaseStation[];
+    labels?: Label[];
+    commands?: EslCommand[];
+    cloudProducts?: Array<Record<string, unknown>>;
+    cloudTemplates?: Array<Record<string, unknown>>;
+    cloudTasks?: Array<Record<string, unknown>>;
+    users?: Array<Record<string, unknown>>;
+    userInvites?: Array<Record<string, unknown>>;
+    auditLogs?: Array<Record<string, unknown>>;
+    requestLogs?: RequestLog[];
+    officialDownlinkCaptures?: OfficialDownlinkCapture[];
+  }) {
+    migrateLegacyOwners(data);
+    data.stores?.forEach((item) => this.stores.set(item.code, newerByUpdatedAt(this.stores.get(item.code), item)));
+    data.baseStations?.forEach((item) => this.baseStations.set(item.id, newerByUpdatedAt(this.baseStations.get(item.id), item)));
+    data.labels?.forEach((item) => this.labels.set(item.id, newerByUpdatedAt(this.labels.get(item.id), item)));
+    data.commands?.forEach((item) => this.commands.set(item.id, newerByUpdatedAt(this.commands.get(item.id), item)));
+    data.cloudProducts?.forEach((item) => {
+      const key = String(item.id);
+      this.cloudProducts.set(key, newerByUpdatedAt(this.cloudProducts.get(key), item));
+    });
+    data.cloudTemplates?.forEach((item) => {
+      const key = String(item.id);
+      this.cloudTemplates.set(key, newerByUpdatedAt(this.cloudTemplates.get(key), item));
+    });
+    data.cloudTasks?.forEach((item) => {
+      const key = String(item.id);
+      this.cloudTasks.set(key, newerByUpdatedAt(this.cloudTasks.get(key), item));
+    });
+    data.users?.forEach((item) => {
+      const key = String(item.id);
+      this.users.set(key, newerByUpdatedAt(this.users.get(key), item));
+    });
+    data.userInvites?.forEach((item) => {
+      const key = String(item.id);
+      this.userInvites.set(key, newerByUpdatedAt(this.userInvites.get(key), item));
+    });
+
+    const auditIds = new Set(this.auditLogs.map((item) => String(item.id)));
+    for (const item of data.auditLogs ?? []) {
+      if (!auditIds.has(String(item.id))) {
+        this.auditLogs.push(item);
+      }
+    }
+    this.auditLogs.sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')));
+    this.auditLogs.splice(1000);
+
+    const logIds = new Set(this.requestLogs.map((item) => item.id));
+    for (const item of data.requestLogs ?? []) {
+      if (!logIds.has(item.id)) {
+        this.requestLogs.push(item);
+      }
+    }
+    this.requestLogs.sort((a, b) => String(b.time ?? '').localeCompare(String(a.time ?? '')));
+    this.requestLogs.splice(1000);
+
+    const captureIds = new Set(this.officialDownlinkCaptures.map((item) => item.id));
+    for (const item of data.officialDownlinkCaptures ?? []) {
+      if (!captureIds.has(item.id)) {
+        this.officialDownlinkCaptures.push(item);
+      }
+    }
+  }
+}
+
+function newerByUpdatedAt<T>(current: T | undefined, incoming: T) {
+  if (!current) return incoming;
+  const currentRow = current as Record<string, unknown>;
+  const incomingRow = incoming as Record<string, unknown>;
+  const currentTime = Date.parse(String(currentRow.updatedAt ?? currentRow.createdAt ?? ''));
+  const incomingTime = Date.parse(String(incomingRow.updatedAt ?? incomingRow.createdAt ?? ''));
+  if (!Number.isFinite(currentTime)) return incoming;
+  if (!Number.isFinite(incomingTime)) return current;
+  return incomingTime >= currentTime ? incoming : current;
 }

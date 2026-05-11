@@ -17,6 +17,7 @@ export const SettingsPage = () => {
   const [resetTarget, setResetTarget] = useState<User | null>(null);
   const isAdmin = user?.role === 'ADMIN';
   const { data: users, isPending: isUsersPending } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
+  const { data: stores } = useQuery({ queryKey: queryKeys.stores, queryFn: () => api.stores({}), enabled: isAdmin });
   const { data: invites, isPending: isInvitesPending } = useQuery({ queryKey: queryKeys.userInvites, queryFn: api.userInvites, enabled: isAdmin });
   const { data: auditLogs, isPending: isAuditLogsPending } = useQuery({ queryKey: queryKeys.auditLogs, queryFn: api.auditLogs, enabled: isAdmin });
   const createInvite = useMutation({
@@ -95,6 +96,13 @@ export const SettingsPage = () => {
           </Form.Item>
           <Form.Item name="role" label={tx('角色', 'Role')}>
             <Select options={[{ label: 'ADMIN', value: 'ADMIN' }, { label: 'OPERATOR', value: 'OPERATOR' }, { label: 'VIEWER', value: 'VIEWER' }]} />
+          </Form.Item>
+          <Form.Item name="storeCode" label={tx('默认门店', 'Default Store')}>
+            <Select
+              allowClear
+              options={(stores?.items ?? []).map((store: any) => ({ label: `${store.name} / ${store.code}`, value: store.code }))}
+              placeholder={tx('可不绑定门店', 'No store required')}
+            />
           </Form.Item>
           <Form.Item name="expiresInDays" label={tx('有效天数', 'Valid Days')}>
             <InputNumber min={1} max={30} style={{ width: '100%' }} />

@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, NotFoundException, Param, Post, Put, Query, Res, Sse, StreamableFile, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, NotFoundException, Param, Post, Put, Query, Req, Res, Sse, StreamableFile, UnauthorizedException, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { extname, join } from 'node:path';
 import { deflateRawSync } from 'node:zlib';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { Observable } from 'rxjs';
 import sharp = require('sharp');
 import bwipjs = require('bwip-js');
@@ -20,6 +20,7 @@ import { MqttService } from '../mqtt/mqtt.service';
 import { RefreshQueueService } from '../refresh-queue/refresh-queue.service';
 
 type Row = Record<string, unknown>;
+type UserRole = 'ADMIN' | 'OPERATOR' | 'VIEWER';
 type LocalDevice = Row & {
   id: string;
   eslCode: string;
@@ -91,6 +92,7 @@ type SilentWakeResult = {
 const now = () => new Date().toISOString();
 const id = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const AUTO_RETRY_LOCK_TTL_MS = 60_000;
 const getUploadDir = () => process.env.UPLOAD_DIR || join(process.cwd(), 'uploads');
 const DEFAULT_TEMPLATE_ID = 'template_default_750_480';
 const DEFAULT_TEMPLATE_DELETED_MARKER = '.default-template-deleted';
@@ -136,11 +138,21 @@ const LABEL_PREFIX_PRESET_KEYS: Array<{ prefix: string; key: string }> = [
   { prefix: '154', key: '15403fca' },
 ];
 
-function paginate<T>(items: T[], query?: Row) {
-  const page = Number(query?.page ?? 1);
-  const pageSize = Number(query?.pageSize ?? 100);
+function paginationParams(query?: Row) {
+  const page = Math.max(1, Math.floor(numberValue(query?.page, 1)));
+  const pageSize = Math.max(1, Math.min(200, Math.floor(numberValue(query?.pageSize, 50))));
   return {
-    items,
+    page,
+    pageSize,
+    start: (page - 1) * pageSize,
+    end: page * pageSize,
+  };
+}
+
+function paginate<T>(items: T[], query?: Row) {
+  const { page, pageSize, start, end } = paginationParams(query);
+  return {
+    items: items.slice(start, end),
     page,
     pageSize,
     total: items.length,
@@ -149,6 +161,11 @@ function paginate<T>(items: T[], query?: Row) {
 
 function stringValue(value: unknown, fallback = '') {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function normalizeRole(value: unknown, fallback: UserRole = 'VIEWER'): UserRole {
+  const role = stringValue(value, fallback).toUpperCase();
+  return role === 'ADMIN' || role === 'OPERATOR' || role === 'VIEWER' ? role : fallback;
 }
 
 function normalizeMacValue(value?: unknown) {
@@ -284,6 +301,64 @@ function defaultSchema(template: Row) {
   };
 }
 
+function migrateLegacyOwners(data: {
+  stores: StoreConfig[];
+  baseStations: BaseStation[];
+  labels: Label[];
+  cloudProducts: Array<Record<string, unknown>>;
+  cloudTemplates: Array<Record<string, unknown>>;
+  cloudTasks: Array<Record<string, unknown>>;
+  users: Array<Record<string, unknown>>;
+}) {
+  const admin = data.users.find((user) => normalizeRole(user.role) === 'ADMIN' && String(user.username ?? '') === 'admin')
+    ?? data.users.find((user) => normalizeRole(user.role) === 'ADMIN')
+    ?? data.users[0];
+  const defaultOwnerId = String(admin?.id ?? '');
+  if (!defaultOwnerId) return;
+
+  for (const store of data.stores) {
+    const row = store as StoreConfig & Row;
+    row.ownerUserId = stringValue(row.ownerUserId, defaultOwnerId);
+  }
+  for (const ap of data.baseStations) {
+    const row = ap as BaseStation & Row;
+    row.ownerUserId = stringValue(row.ownerUserId, String((data.stores.find((store) => store.code === ap.storeCode) as Row | undefined)?.ownerUserId ?? defaultOwnerId));
+  }
+  for (const label of data.labels) {
+    const row = label as Label & Row;
+    const ap = label.apId ? data.baseStations.find((item) => item.id === label.apId) as Row | undefined : undefined;
+    row.ownerUserId = stringValue(row.ownerUserId, String(ap?.ownerUserId ?? (data.stores.find((store) => store.code === label.storeCode) as Row | undefined)?.ownerUserId ?? defaultOwnerId));
+  }
+  for (const product of data.cloudProducts) {
+    product.ownerUserId = stringValue(product.ownerUserId, String((data.stores.find((store) => store.code === product.storeCode) as Row | undefined)?.ownerUserId ?? defaultOwnerId));
+  }
+  for (const template of data.cloudTemplates) {
+    template.ownerUserId = stringValue(template.ownerUserId, String((data.stores.find((store) => store.code === template.storeCode) as Row | undefined)?.ownerUserId ?? defaultOwnerId));
+  }
+  for (const task of data.cloudTasks) {
+    const label = data.labels.find((item) => item.id === task.eslDeviceId) as Row | undefined;
+    task.ownerUserId = stringValue(task.ownerUserId, String(label?.ownerUserId ?? defaultOwnerId));
+  }
+}
+
+function ownershipFingerprint(snapshot: {
+  stores: StoreConfig[];
+  baseStations: BaseStation[];
+  labels: Label[];
+  cloudProducts: Row[];
+  cloudTemplates: Row[];
+  cloudTasks: Row[];
+}) {
+  return JSON.stringify({
+    stores: snapshot.stores.map((item) => (item as unknown as Row).ownerUserId),
+    baseStations: snapshot.baseStations.map((item) => (item as unknown as Row).ownerUserId),
+    labels: snapshot.labels.map((item) => (item as unknown as Row).ownerUserId),
+    products: snapshot.cloudProducts.map((item) => item.ownerUserId),
+    templates: snapshot.cloudTemplates.map((item) => item.ownerUserId),
+    tasks: snapshot.cloudTasks.map((item) => item.ownerUserId),
+  });
+}
+
 function resizeSchemaToCanvas(schema: Row, width: number, height: number, deviceType: string, colorMode: string) {
   const meta = (schema.meta && typeof schema.meta === 'object' ? schema.meta : {}) as Row;
   const oldWidth = numberValue(meta.width, width);
@@ -336,6 +411,7 @@ export class LocalCloudController {
   ) {
     this.refreshQueue.registerHandler(({ taskId }) => this.executeQueuedRefreshTask(taskId));
     setTimeout(() => {
+      this.ensureOwnershipBackfill();
       void this.recoverQueuedRefreshTasks();
       this.startLabelKeepaliveLoops();
     }, 1000);
@@ -345,32 +421,98 @@ export class LocalCloudController {
   login(@Body() body: Row) {
     const storeCode = stringValue(body.storeCode, process.env.UPSTREAM_STORE_CODE ?? '20248517');
     const username = stringValue(body.username, 'admin');
-    const store = this.db.stores.get(storeCode) ?? [...this.db.stores.values()][0];
-    if (!store || store.username !== username || !bcrypt.compareSync(String(body.password ?? ''), store.passwordHash)) {
+    const user = this.findLoginUser(storeCode, username, false) ?? this.findLoginUser(undefined, username, false);
+    if (!user || !bcrypt.compareSync(String(body.password ?? ''), String(user.passwordHash ?? ''))) {
       throw new NotFoundException('Invalid username or password');
     }
-    const user = {
-      id: store.id,
-      username: store.username,
-      displayName: store.name,
-      role: 'ADMIN' as const,
-      status: 'active' as const,
-      createdAt: store.createdAt,
-    };
+    if (String(user.status ?? 'active') === 'disabled') {
+      throw new BadRequestException('User is disabled');
+    }
+    user.lastLoginAt = now();
+    user.updatedAt = now();
+    this.db.users.set(String(user.id), user);
+    this.db.save();
+    const store = this.db.stores.get(String(user.storeCode ?? '')) ?? [...this.db.stores.values()][0];
     return {
-      accessToken: this.jwt.sign({ sub: store.id, storeCode: store.code, username: store.username }),
-      refreshToken: this.jwt.sign({ sub: store.id, type: 'refresh' }, { expiresIn: '30d' }),
+      accessToken: this.jwt.sign({ sub: user.id, storeCode: store?.code, username: user.username }),
+      refreshToken: this.jwt.sign({ sub: user.id, type: 'refresh' }, { expiresIn: '30d' }),
       expiresIn: 28800,
-      user,
+      user: this.localUser(user),
+    };
+  }
+
+  @Get('auth/invites/:token')
+  inviteDetail(@Param('token') token: string) {
+    const invite = this.findInviteByToken(token);
+    this.assertInviteUsable(invite);
+    return this.publicInvite(invite);
+  }
+
+  @Post('auth/register')
+  register(@Body() body: Row) {
+    const token = stringValue(body.token);
+    const password = String(body.password ?? '');
+    if (password.length < 6) {
+      throw new BadRequestException('Password must be at least 6 characters');
+    }
+    const invite = this.findInviteByToken(token);
+    this.assertInviteUsable(invite);
+    const storeCode = stringValue(invite.storeCode);
+    if (this.findLoginUser(undefined, String(invite.username), false)) {
+      throw new BadRequestException('Username already exists');
+    }
+
+    const timestamp = now();
+    const user = {
+      id: id('user'),
+      storeCode: storeCode || undefined,
+      username: stringValue(invite.username),
+      displayName: stringValue(body.displayName, stringValue(invite.displayName, stringValue(invite.username))),
+      email: stringValue(body.email, stringValue(invite.email)) || undefined,
+      role: normalizeRole(invite.role),
+      status: 'active',
+      passwordHash: bcrypt.hashSync(password, 10),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      lastLoginAt: timestamp,
+    };
+    invite.usedAt = timestamp;
+    invite.updatedAt = timestamp;
+    invite.usedByUserId = user.id;
+    this.db.users.set(user.id, user);
+    this.db.userInvites.set(String(invite.id), invite);
+    this.addAuditLog('users', 'register', user.id, null, this.localUser(user));
+    this.db.save();
+
+    return {
+      accessToken: this.jwt.sign({ sub: user.id, storeCode: user.storeCode, username: user.username }),
+      refreshToken: this.jwt.sign({ sub: user.id, type: 'refresh' }, { expiresIn: '30d' }),
+      expiresIn: 28800,
+      user: this.localUser(user),
     };
   }
 
   @Post('auth/refresh')
-  refresh() {
-    const store = [...this.db.stores.values()][0];
+  refresh(@Body() body: Row) {
+    const refreshToken = stringValue(body.refreshToken);
+    if (!refreshToken) {
+      throw new UnauthorizedException('Refresh token is required');
+    }
+    let decoded: Row;
+    try {
+      decoded = this.jwt.verify<Row>(refreshToken);
+    } catch {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+    const userId = stringValue(decoded.sub);
+    const user = userId ? this.db.users.get(userId) : undefined;
+    if (!user) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+    const store = this.db.stores.get(String(user.storeCode ?? '')) ?? [...this.db.stores.values()][0];
     return {
-      accessToken: this.jwt.sign({ sub: store?.id ?? 'local', storeCode: store?.code, username: store?.username }),
-      refreshToken: this.jwt.sign({ sub: store?.id ?? 'local', type: 'refresh' }, { expiresIn: '30d' }),
+      accessToken: this.jwt.sign({ sub: user.id, storeCode: store?.code, username: user.username }),
+      refreshToken: this.jwt.sign({ sub: user.id, type: 'refresh' }, { expiresIn: '30d' }),
       expiresIn: 28800,
     };
   }
@@ -392,28 +534,20 @@ export class LocalCloudController {
   }
 
   @Get('auth/me')
-  me() {
-    const store = [...this.db.stores.values()][0];
-    return {
-      id: store?.id ?? 'local-admin',
-      username: store?.username ?? 'admin',
-      displayName: store?.name ?? 'Local ESL Cloud',
-      role: 'ADMIN',
-      status: 'active',
-      createdAt: store?.createdAt ?? now(),
-    };
+  me(@Req() request: Request) {
+    return this.localUser(this.currentUser(request));
   }
 
   @Get('dashboard/summary')
-  dashboard() {
-    const aps = this.localAps();
-    const devices = this.localDevices();
+  dashboard(@Req() request: Request) {
+    const aps = this.localAps(request);
+    const devices = this.visibleDeviceLabels(request);
     const today = new Date().toISOString().slice(0, 10);
-    const tasks = [...this.db.cloudTasks.values()];
+    const tasks = this.visibleRows([...this.db.cloudTasks.values()], request);
     return {
       apOnlineCount: aps.filter((item) => item.online).length,
       apOfflineCount: aps.filter((item) => !item.online).length,
-      deviceOnlineCount: devices.filter((item) => item.status === 'online').length,
+      deviceOnlineCount: devices.filter((item) => isRecentActivity(item.updatedAt) && item.status !== 'idle' && item.status !== 'offline').length,
       todayTaskSuccess: tasks.filter((item) => String(item.status) === 'success' && String(item.updatedAt ?? '').startsWith(today)).length,
       recentApEvents: aps.slice(0, 5).map((ap) => ({
         type: 'ap',
@@ -432,12 +566,12 @@ export class LocalCloudController {
   }
 
   @Get('stores')
-  stores(@Query() query: Row) {
-    return paginate(this.localStores(), query);
+  stores(@Query() query: Row, @Req() request: Request) {
+    return paginate(this.filterRowsByOwnerAndKeyword(this.localStores(request), query, ['name', 'code', 'address']), query);
   }
 
   @Post('stores')
-  createStore(@Body() body: Row) {
+  createStore(@Body() body: Row, @Req() request: Request) {
     const code = stringValue(body.code).trim();
     if (!/^\d+$/.test(code)) {
       throw new BadRequestException('门店号只能为数字');
@@ -457,18 +591,18 @@ export class LocalCloudController {
       serverUrl: stringValue(body.serverUrl, fallback?.serverUrl ?? process.env.PUBLIC_SERVER_URL ?? 'http://localhost:4000'),
       mqttTcpPort: numberValue(body.mqttTcpPort, fallback?.mqttTcpPort ?? Number(process.env.MQTT_TCP_PORT ?? 1883)),
       mqttWsPath: stringValue(body.mqttWsPath, fallback?.mqttWsPath ?? process.env.MQTT_WS_PATH ?? '/mqtt'),
+      ownerUserId: this.ownerUserIdForWrite(body, request),
       createdAt: timestamp,
       updatedAt: timestamp,
-    };
+    } as StoreConfig & Row;
     this.db.stores.set(store.code, store);
     this.db.save();
-    return this.localStore(store);
+    return this.localStore(store, request);
   }
 
   @Put('stores/:code')
-  updateStore(@Param('code') code: string, @Body() body: Row) {
-    const store = this.db.stores.get(code);
-    if (!store) throw new NotFoundException('Store not found');
+  updateStore(@Param('code') code: string, @Body() body: Row, @Req() request: Request) {
+    const store = this.assertRowVisible(this.db.stores.get(code) as StoreConfig & Row | undefined, request, 'Store not found');
     const nextCode = stringValue(body.code, code).trim();
     if (!/^\d+$/.test(nextCode)) {
       throw new BadRequestException('门店号只能为数字');
@@ -489,12 +623,12 @@ export class LocalCloudController {
     }
     this.db.stores.set(nextCode, next);
     this.db.save();
-    return this.localStore(next);
+    return this.localStore(next, request);
   }
 
   @Delete('stores/:code')
-  deleteStore(@Param('code') code: string) {
-    if (!this.db.stores.has(code)) throw new NotFoundException('Store not found');
+  deleteStore(@Param('code') code: string, @Req() request: Request) {
+    this.assertRowVisible(this.db.stores.get(code) as StoreConfig & Row | undefined, request, 'Store not found');
     this.db.stores.delete(code);
     this.deleteStoreReferences(code);
     this.db.save();
@@ -502,74 +636,108 @@ export class LocalCloudController {
   }
 
   @Get('products')
-  products(@Query() query: Row) {
-    return paginate(this.localProducts(), query);
+  products(@Query() query: Row, @Req() request: Request) {
+    return paginate(this.filterRowsByOwnerAndKeyword(this.localProducts(request), query, ['name', 'sku', 'barcode', 'status']), query);
   }
 
   @Post('products')
-  createProduct(@Body() body: Row) {
-    const product = this.upsertProduct({ ...body, id: id('product') });
+  createProduct(@Body() body: Row, @Req() request: Request) {
+    const product = this.upsertProduct({ ...body, id: id('product'), ownerUserId: this.ownerUserIdForWrite(body, request) });
     return product;
   }
 
   @Get('products/:productId')
-  product(@Param('productId') productId: string) {
-    const product = this.findProduct(productId);
+  product(@Param('productId') productId: string, @Req() request: Request) {
+    const product = this.assertRowVisible(this.findProduct(productId), request, 'Product not found');
     return {
       ...product,
-      defaultTemplate: product.defaultTemplateId ? this.db.cloudTemplates.get(String(product.defaultTemplateId)) ?? null : null,
-      boundDevices: this.localDevices().filter((item) => item.productId === productId),
+      defaultTemplate: product.defaultTemplateId ? this.visibleRows([...this.db.cloudTemplates.values()], request).find((item) => item.id === product.defaultTemplateId) ?? null : null,
+      boundDevices: this.localDevices(request).filter((item) => item.productId === productId),
     };
   }
 
   @Put('products/:productId')
-  async updateProduct(@Param('productId') productId: string, @Body() body: Row) {
-    const current = this.findProduct(productId);
+  async updateProduct(@Param('productId') productId: string, @Body() body: Row, @Req() request: Request) {
+    const current = this.assertRowVisible(this.findProduct(productId), request, 'Product not found');
     const product = this.upsertProduct({ ...current, ...body, id: productId });
-    const refresh = await this.refreshLinkedProductDevices(productId, 'product_update_refresh');
+    const refresh = await this.refreshLinkedProductDevices(productId, 'product_update_refresh', request);
     return {
       ...product,
       refresh,
     };
   }
 
+  @Get('products/:productId/delete-impact')
+  productDeleteImpact(@Param('productId') productId: string, @Req() request: Request) {
+    const product = this.assertRowVisible(this.findProduct(productId), request, 'Product not found');
+    return this.productDeleteImpactPayload(product);
+  }
+
+  @Delete('products/:productId')
+  deleteProduct(@Param('productId') productId: string, @Req() request: Request) {
+    const product = this.assertRowVisible(this.findProduct(productId), request, 'Product not found');
+    const impact = this.productDeleteImpactPayload(product);
+    this.db.cloudProducts.delete(productId);
+    for (const label of this.db.labels.values()) {
+      const row = label as Label & Row;
+      if (String(row.productId ?? '') === productId) {
+        delete row.productId;
+        row.updatedAt = now();
+      }
+    }
+    for (const task of this.db.cloudTasks.values()) {
+      if (String(task.productId ?? '') === productId) {
+        delete task.productId;
+      }
+    }
+    this.db.save();
+    return { deleted: true, id: productId, impact };
+  }
+
   @Post('products/:productId/refresh-linked-devices')
-  async refreshProduct(@Param('productId') productId: string) {
-    this.findProduct(productId);
-    return this.refreshLinkedProductDevices(productId, 'product_refresh');
+  async refreshProduct(@Param('productId') productId: string, @Req() request: Request) {
+    this.assertRowVisible(this.findProduct(productId), request, 'Product not found');
+    return this.refreshLinkedProductDevices(productId, 'product_refresh', request);
   }
 
   @Get('templates')
-  templates(@Query() query: Row) {
+  templates(@Query() query: Row, @Req() request: Request) {
     this.ensureDefaultTemplate();
-    return paginate([...this.db.cloudTemplates.values()].map((item) => this.ensureTemplatePreview(item)), query);
+    const templates = this.visibleRows([...this.db.cloudTemplates.values()], request).map((item) => this.localTemplate(item, request));
+    return paginate(this.filterRowsByOwnerAndKeyword(templates, query, ['name', 'code', 'deviceType', 'status']), query);
   }
 
   @Post('templates')
-  createTemplate(@Body() body: Row) {
-    const template = this.upsertTemplate({ ...body, id: id('template') });
+  createTemplate(@Body() body: Row, @Req() request: Request) {
+    const template = this.upsertTemplate({ ...body, id: id('template'), ownerUserId: this.ownerUserIdForWrite(body, request) });
     return template;
   }
 
   @Get('templates/:templateId')
-  template(@Param('templateId') templateId: string) {
-    return this.findTemplate(templateId);
+  template(@Param('templateId') templateId: string, @Req() request: Request) {
+    return this.assertRowVisible(this.findTemplate(templateId), request, 'Template not found');
+  }
+
+  @Get('templates/:templateId/delete-impact')
+  templateDeleteImpact(@Param('templateId') templateId: string, @Req() request: Request) {
+    const template = this.assertRowVisible(this.findTemplate(templateId), request, 'Template not found');
+    return this.templateDeleteImpactPayload(template);
   }
 
   @Put('templates/:templateId')
-  updateTemplate(@Param('templateId') templateId: string, @Body() body: Row) {
-    const current = this.findTemplate(templateId);
+  updateTemplate(@Param('templateId') templateId: string, @Body() body: Row, @Req() request: Request) {
+    const current = this.assertRowVisible(this.findTemplate(templateId), request, 'Template not found');
     return this.upsertTemplate({ ...current, ...body, id: templateId });
   }
 
   @Get('templates/:templateId/schema')
-  templateSchema(@Param('templateId') templateId: string) {
-    return { schema: this.findTemplate(templateId).schema };
+  templateSchema(@Param('templateId') templateId: string, @Req() request: Request) {
+    return { schema: this.assertRowVisible(this.findTemplate(templateId), request, 'Template not found').schema };
   }
 
   @Put('templates/:templateId/schema')
-  saveTemplateSchema(@Param('templateId') templateId: string, @Body() body: Row) {
-    const current = this.findTemplate(templateId);
+  saveTemplateSchema(@Param('templateId') templateId: string, @Body() body: Row, @Req() request: Request) {
+    const current = this.assertRowVisible(this.findTemplate(templateId), request, 'Template not found');
     const schema = body.schema ?? current.schema;
     const template = this.upsertTemplate({
       ...current,
@@ -581,8 +749,8 @@ export class LocalCloudController {
   }
 
   @Get('templates/:templateId/preview-image')
-  async templatePreviewImage(@Param('templateId') templateId: string, @Res({ passthrough: true }) response: Response) {
-    const template = this.findTemplate(templateId);
+  async templatePreviewImage(@Param('templateId') templateId: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const template = this.assertRowVisible(this.findTemplate(templateId), request, 'Template not found');
     const render = await this.renderTemplateForLabel(this.labelFromProduct({
       id: 'preview',
       sku: 'PREVIEW',
@@ -596,8 +764,8 @@ export class LocalCloudController {
   }
 
   @Post('templates/:templateId/preview')
-  async previewTemplate(@Param('templateId') templateId: string, @Body() body: Row) {
-    const template = this.findTemplate(templateId);
+  async previewTemplate(@Param('templateId') templateId: string, @Body() body: Row, @Req() request: Request) {
+    const template = this.assertRowVisible(this.findTemplate(templateId), request, 'Template not found');
     const sampleData = (body.sampleData && typeof body.sampleData === 'object' ? body.sampleData : {}) as Row;
     const label = this.labelFromProduct({
       id: 'preview',
@@ -619,8 +787,8 @@ export class LocalCloudController {
   }
 
   @Post('templates/:templateId/publish')
-  async publishTemplate(@Param('templateId') templateId: string, @Body() body: Row) {
-    const current = this.findTemplate(templateId);
+  async publishTemplate(@Param('templateId') templateId: string, @Body() body: Row, @Req() request: Request) {
+    const current = this.assertRowVisible(this.findTemplate(templateId), request, 'Template not found');
     const template = this.upsertTemplate({
       ...current,
       status: 'published',
@@ -629,10 +797,10 @@ export class LocalCloudController {
     });
     const refreshLinkedDevices = body.refreshLinkedDevices !== false;
     const refresh = refreshLinkedDevices
-      ? await this.refreshTemplateLinkedDevices(templateId, 'template_publish_refresh')
+      ? await this.refreshTemplateLinkedDevices(templateId, 'template_publish_refresh', request)
       : {
           attempted: false,
-          boundDeviceCount: this.localDevices().filter((item) => item.templateId === templateId).length,
+          boundDeviceCount: this.localDevices(request).filter((item) => item.templateId === templateId).length,
           refreshableDeviceCount: 0,
           skippedDeviceCount: 0,
           createdTaskCount: 0,
@@ -644,8 +812,8 @@ export class LocalCloudController {
   }
 
   @Post('templates/:templateId/duplicate')
-  duplicateTemplate(@Param('templateId') templateId: string, @Body() body: Row) {
-    const current = this.findTemplate(templateId);
+  duplicateTemplate(@Param('templateId') templateId: string, @Body() body: Row, @Req() request: Request) {
+    const current = this.assertRowVisible(this.findTemplate(templateId), request, 'Template not found');
     return this.upsertTemplate({
       ...current,
       id: id('template'),
@@ -656,10 +824,9 @@ export class LocalCloudController {
   }
 
   @Delete('templates/:templateId')
-  async deleteTemplate(@Param('templateId') templateId: string) {
-    if (!this.db.cloudTemplates.has(templateId)) {
-      throw new NotFoundException('Template not found');
-    }
+  async deleteTemplate(@Param('templateId') templateId: string, @Req() request: Request) {
+    const template = this.assertRowVisible(this.findTemplate(templateId), request, 'Template not found');
+    const impact = this.templateDeleteImpactPayload(template);
     this.db.cloudTemplates.delete(templateId);
     for (const product of this.db.cloudProducts.values()) {
       if (String(product.defaultTemplateId ?? '') === templateId) {
@@ -676,7 +843,7 @@ export class LocalCloudController {
       await this.markDefaultTemplateDeleted();
     }
     this.db.save();
-    return { deleted: true, id: templateId };
+    return { deleted: true, id: templateId, name: template.name, impact };
   }
 
   @Delete('templates/:templateId/versions/:versionId')
@@ -685,22 +852,105 @@ export class LocalCloudController {
   }
 
   @Get('esl-devices')
-  devices(@Query() query: Row) {
-    return paginate(this.filterDevices(this.localDevices(), query), query);
+  devices(@Query() query: Row, @Req() request: Request) {
+    const labels = this.filterDeviceLabels(this.visibleDeviceLabels(request), query, request);
+    const { page, pageSize, start, end } = paginationParams(query);
+    return {
+      items: labels.slice(start, end).map((label) => this.localDeviceListItem(label, request)),
+      page,
+      pageSize,
+      total: labels.length,
+    };
+  }
+
+  @Post('esl-devices/batch-bind')
+  async batchBindDevices(@Body() body: Row, @Req() request: Request) {
+    const ids = this.bodyIds(body, 'deviceIds');
+    if (!ids.length) throw new BadRequestException('请选择要绑定的显示节点');
+    const productId = stringValue(body.productId);
+    const templateId = stringValue(body.templateId);
+    const product = productId ? this.assertRowVisible(this.findProduct(productId), request, 'Product not found') : null;
+    if (templateId) {
+      this.assertRowVisible(this.findTemplate(templateId), request, 'Template not found');
+    }
+    if (!product && !templateId) {
+      throw new BadRequestException('请选择商品或模板');
+    }
+
+    const updatedIds: string[] = [];
+    for (const deviceId of ids) {
+      const label = this.assertRowVisible(this.findLabel(deviceId) as Label & Row, request, 'Display node not found');
+      if (product) {
+        label.productId = product.id;
+        label.sku = stringValue(product.sku, label.sku);
+        label.title = stringValue(product.name, label.title);
+        label.price = numberValue(product.price, label.price);
+      }
+      if (templateId) {
+        label.templateId = templateId;
+      } else if (product && product.defaultTemplateId) {
+        label.templateId = stringValue(product.defaultTemplateId);
+      }
+      label.updatedAt = now();
+      this.db.labels.set(label.id, label);
+      updatedIds.push(label.id);
+    }
+    this.db.save();
+    return { updatedCount: updatedIds.length, deviceIds: updatedIds };
+  }
+
+  @Post('esl-devices/batch-unbind')
+  batchUnbindDevices(@Body() body: Row, @Req() request: Request) {
+    const ids = this.bodyIds(body, 'deviceIds');
+    if (!ids.length) throw new BadRequestException('请选择要解绑的显示节点');
+    let updatedCount = 0;
+    for (const deviceId of ids) {
+      const label = this.assertRowVisible(this.findLabel(deviceId) as Label & Row, request, 'Display node not found');
+      delete label.productId;
+      delete label.templateId;
+      label.updatedAt = now();
+      updatedCount += 1;
+    }
+    this.db.save();
+    return { updatedCount };
+  }
+
+  @Delete('esl-devices/batch')
+  batchDeleteDevices(@Body() body: Row, @Req() request: Request) {
+    const ids = this.bodyIds(body, 'deviceIds');
+    if (!ids.length) throw new BadRequestException('请选择要删除的显示节点');
+    const impacts = ids.map((deviceId) => {
+      const label = this.assertRowVisible(this.findLabel(deviceId) as Label & Row, request, 'Display node not found');
+      return this.deviceDeleteImpactPayload(label);
+    });
+    for (const deviceId of ids) {
+      this.db.labels.delete(deviceId);
+      for (const task of this.db.cloudTasks.values()) {
+        if (String(task.eslDeviceId ?? '') === deviceId) {
+          delete task.eslDeviceId;
+        }
+      }
+    }
+    this.db.save();
+    return { deletedCount: ids.length, impacts };
   }
 
   @Post('esl-devices')
-  createDevice(@Body() body: Row) {
+  createDevice(@Body() body: Row, @Req() request: Request) {
     const apId = stringValue(body.apId) || undefined;
+    if (apId) {
+      this.assertRowVisible(this.findAp(apId, false) as (BaseStation & Row) | undefined, request, 'AP not found');
+    }
     const storeCode = stringValue(
       body.storeCode,
-      apId ? this.findAp(apId, false)?.storeCode : ([...this.db.stores.values()][0]?.code ?? 'local'),
+      apId ? this.findAp(apId, false)?.storeCode : stringValue([...this.db.stores.values()][0]?.code),
     );
-    if (!this.db.stores.has(storeCode)) throw new BadRequestException('门店不存在，请先创建门店');
+    this.assertRowVisible(this.db.stores.get(storeCode) as StoreConfig & Row | undefined, request, '门店不存在，请先创建门店');
     const label: Label & Row = {
       id: stringValue(body.eslCode, id('label')),
       storeCode,
       apId,
+      ownerUserId: this.ownerUserIdForWrite(body, request),
       sku: stringValue(body.eslCode),
       title: stringValue(body.name, stringValue(body.eslCode, 'Display Node')),
       price: 0,
@@ -712,29 +962,29 @@ export class LocalCloudController {
     };
     this.db.labels.set(label.id, label);
     this.db.save();
-    return this.localDevice(label);
+    return this.localDevice(label, true, request);
   }
 
   @Get('esl-devices/:deviceId')
-  device(@Param('deviceId') deviceId: string) {
-    const label = this.findLabel(deviceId);
+  device(@Param('deviceId') deviceId: string, @Req() request: Request) {
+    const label = this.assertRowVisible(this.findLabel(deviceId) as Label & Row, request, 'Display node not found');
     return {
-      ...this.localDevice(label),
+      ...this.localDevice(label, true, request),
       recentTasks: [...this.db.cloudTasks.values()]
-        .filter((item) => item.eslDeviceId === deviceId)
+        .filter((item) => item.eslDeviceId === deviceId && this.canAccessRow(item as Row, request))
         .map((item) => this.localTask(item, false)),
     };
   }
 
   @Put('esl-devices/:deviceId')
-  updateDevice(@Param('deviceId') deviceId: string, @Body() body: Row) {
-    const label = this.findLabel(deviceId) as Label & Row;
+  updateDevice(@Param('deviceId') deviceId: string, @Body() body: Row, @Req() request: Request) {
+    const label = this.assertRowVisible(this.findLabel(deviceId) as Label & Row, request, 'Display node not found');
     const nextApId = stringValue(body.apId) || undefined;
     label.id = stringValue(body.eslCode, label.id);
     label.title = stringValue(body.name, label.title);
     label.apId = nextApId;
     if (nextApId) {
-      const ap = this.findAp(nextApId);
+      const ap = this.assertRowVisible(this.findAp(nextApId) as BaseStation & Row, request, 'AP not found');
       label.storeCode = ap.storeCode;
     }
     label.productId = stringValue(body.productId) || undefined;
@@ -745,13 +995,13 @@ export class LocalCloudController {
     }
     this.db.labels.set(label.id, label);
     this.db.save();
-    return this.localDevice(label);
+    return this.localDevice(label, true, request);
   }
 
   @Post('esl-devices/:deviceId/bind')
-  async bindDevice(@Param('deviceId') deviceId: string, @Body() body: Row) {
-    const label = this.findLabel(deviceId) as Label & Row;
-    const product = this.findProduct(String(body.productId));
+  async bindDevice(@Param('deviceId') deviceId: string, @Body() body: Row, @Req() request: Request) {
+    const label = this.assertRowVisible(this.findLabel(deviceId) as Label & Row, request, 'Display node not found');
+    const product = this.assertRowVisible(this.findProduct(String(body.productId)), request, 'Product not found');
     label.productId = product.id;
     label.templateId = stringValue(body.templateId, stringValue(product.defaultTemplateId));
     label.sku = stringValue(product.sku, label.sku);
@@ -761,28 +1011,49 @@ export class LocalCloudController {
     this.db.labels.set(label.id, label);
     this.db.save();
     const task = body.autoRefresh === false ? null : await this.createRefreshTask(label.id, 'bind_refresh');
-    return { ...this.localDevice(label), recentTasks: task ? [this.localTask(task, false)] : [] };
+    return { ...this.localDevice(label, true, request), recentTasks: task ? [this.localTask(task, false)] : [] };
   }
 
   @Post('esl-devices/:deviceId/unbind')
-  unbindDevice(@Param('deviceId') deviceId: string) {
-    const label = this.findLabel(deviceId) as Label & Row;
+  unbindDevice(@Param('deviceId') deviceId: string, @Req() request: Request) {
+    const label = this.assertRowVisible(this.findLabel(deviceId) as Label & Row, request, 'Display node not found');
     delete label.productId;
     delete label.templateId;
     label.updatedAt = now();
     this.db.save();
-    return this.localDevice(label);
+    return this.localDevice(label, true, request);
+  }
+
+  @Get('esl-devices/:deviceId/delete-impact')
+  deviceDeleteImpact(@Param('deviceId') deviceId: string, @Req() request: Request) {
+    const label = this.assertRowVisible(this.findLabel(deviceId) as Label & Row, request, 'Display node not found');
+    return this.deviceDeleteImpactPayload(label);
+  }
+
+  @Delete('esl-devices/:deviceId')
+  deleteDevice(@Param('deviceId') deviceId: string, @Req() request: Request) {
+    const label = this.assertRowVisible(this.findLabel(deviceId) as Label & Row, request, 'Display node not found');
+    const impact = this.deviceDeleteImpactPayload(label);
+    this.db.labels.delete(deviceId);
+    for (const task of this.db.cloudTasks.values()) {
+      if (String(task.eslDeviceId ?? '') === deviceId) {
+        delete task.eslDeviceId;
+      }
+    }
+    this.db.save();
+    return { deleted: true, id: deviceId, impact };
   }
 
   @Post('esl-devices/:deviceId/refresh')
-  async refreshDevice(@Param('deviceId') deviceId: string) {
+  async refreshDevice(@Param('deviceId') deviceId: string, @Req() request: Request) {
+    this.assertRowVisible(this.findLabel(deviceId) as Label & Row, request, 'Display node not found');
     const task = await this.createRefreshTask(deviceId, 'manual_refresh');
     return { ok: true, taskId: task.id };
   }
 
   @Post('esl-devices/:deviceId/silent-wake')
-  async silentWakeDevice(@Param('deviceId') deviceId: string, @Body() body: Row) {
-    const label = this.findLabel(deviceId);
+  async silentWakeDevice(@Param('deviceId') deviceId: string, @Body() body: Row, @Req() request: Request) {
+    const label = this.assertRowVisible(this.findLabel(deviceId) as Label & Row, request, 'Display node not found');
     return this.runSilentWake([label.id], {
       apId: stringValue(body.apId, label.apId),
       waitMs: numberValue(body.waitMs, 8000),
@@ -809,27 +1080,28 @@ export class LocalCloudController {
   }
 
   @Post('esl-devices/:deviceId/adjust')
-  adjustDevice(@Param('deviceId') deviceId: string) {
-    this.findLabel(deviceId);
+  adjustDevice(@Param('deviceId') deviceId: string, @Req() request: Request) {
+    this.assertRowVisible(this.findLabel(deviceId) as Label & Row, request, 'Display node not found');
     return { ok: true };
   }
 
   @Get('esl-devices/:deviceId/tasks')
-  deviceTasks(@Param('deviceId') deviceId: string) {
+  deviceTasks(@Param('deviceId') deviceId: string, @Req() request: Request) {
+    this.assertRowVisible(this.findLabel(deviceId) as Label & Row, request, 'Display node not found');
     return [...this.db.cloudTasks.values()]
-      .filter((item) => item.eslDeviceId === deviceId)
+      .filter((item) => item.eslDeviceId === deviceId && this.canAccessRow(item as Row, request))
       .map((item) => this.localTask(item, false));
   }
 
   @Get('aps')
-  aps(@Query() query: Row) {
-    return paginate(this.filterAps(this.localAps(), query), query);
+  aps(@Query() query: Row, @Req() request: Request) {
+    return paginate(this.filterAps(this.localAps(request), query), query);
   }
 
   @Post('aps')
-  createAp(@Body() body: Row) {
+  createAp(@Body() body: Row, @Req() request: Request) {
     const storeCode = stringValue(body.storeCode, [...this.db.stores.values()][0]?.code ?? 'local');
-    if (!this.db.stores.has(storeCode)) throw new BadRequestException('门店不存在，请先创建门店');
+    this.assertRowVisible(this.db.stores.get(storeCode) as StoreConfig & Row | undefined, request, '门店不存在，请先创建门店');
     const requestedApCode = stringValue(body.apCode);
     const mac = normalizeMacValue(body.mac);
     const existingByMac = mac ? this.findApByMac(mac) as BaseStation & Row | undefined : undefined;
@@ -841,6 +1113,7 @@ export class LocalCloudController {
     const ap: BaseStation & Row = {
       id: apCode,
       storeCode,
+      ownerUserId: this.ownerUserIdForWrite(body, request),
       name: stringValue(body.name, current?.name ?? apCode),
       ip: stringValue(body.ip) || current?.ip,
       mac: mac || current?.mac,
@@ -858,23 +1131,23 @@ export class LocalCloudController {
     };
     this.db.baseStations.set(ap.id, ap);
     this.db.save();
-    return this.localAp(ap);
+    return this.localAp(ap, request);
   }
 
   @Get('aps/:apId')
-  ap(@Param('apId') apId: string) {
-    return this.localAp(this.findAp(apId));
+  ap(@Param('apId') apId: string, @Req() request: Request) {
+    return this.localAp(this.assertRowVisible(this.findAp(apId) as BaseStation & Row, request, 'AP not found'), request);
   }
 
   @Put('aps/:apId')
-  updateAp(@Param('apId') apId: string, @Body() body: Row) {
+  updateAp(@Param('apId') apId: string, @Body() body: Row, @Req() request: Request) {
     const requestedApCode = stringValue(body.apCode);
     const ap = (requestedApCode && requestedApCode !== apId
       ? this.renameApId(apId, requestedApCode)
-      : this.findAp(apId)) as BaseStation & Row;
+      : this.assertRowVisible(this.findAp(apId) as BaseStation & Row, request, 'AP not found')) as BaseStation & Row;
     ap.name = stringValue(body.name, ap.name);
     const storeCode = stringValue(body.storeCode, ap.storeCode);
-    if (!this.db.stores.has(storeCode)) throw new BadRequestException('门店不存在，请先创建门店');
+    this.assertRowVisible(this.db.stores.get(storeCode) as StoreConfig & Row | undefined, request, '门店不存在，请先创建门店');
     ap.storeCode = storeCode;
     ap.ip = stringValue(body.ip) || ap.ip;
     ap.mac = normalizeMacValue(body.mac) || ap.mac;
@@ -886,12 +1159,12 @@ export class LocalCloudController {
       autoImportScannedLabels: (ap.config as Row | undefined)?.autoImportScannedLabels === true,
     };
     this.db.save();
-    return this.localAp(ap);
+    return this.localAp(ap, request);
   }
 
   @Put('aps/:apId/auto-import-scanned-labels')
-  updateApAutoImportScannedLabels(@Param('apId') apId: string, @Body() body: Row) {
-    const ap = this.findAp(apId) as BaseStation & Row;
+  updateApAutoImportScannedLabels(@Param('apId') apId: string, @Body() body: Row, @Req() request: Request) {
+    const ap = this.assertRowVisible(this.findAp(apId) as BaseStation & Row, request, 'AP not found') as BaseStation & Row;
     const enabled = readBool(body.enabled, false);
     ap.config = {
       ...(ap.config && typeof ap.config === 'object' ? ap.config as Row : {}),
@@ -899,35 +1172,36 @@ export class LocalCloudController {
     };
     this.db.baseStations.set(ap.id, ap);
     this.db.save();
-    return this.localAp(ap);
+    return this.localAp(ap, request);
   }
 
   @Post('aps/:apId/sync-status')
-  syncAp(@Param('apId') apId: string) {
-    const ap = this.findAp(apId);
-    return { ok: true, status: this.localAp(ap)?.status ?? 'offline' };
+  syncAp(@Param('apId') apId: string, @Req() request: Request) {
+    const ap = this.assertRowVisible(this.findAp(apId) as BaseStation & Row, request, 'AP not found');
+    return { ok: true, status: this.localAp(ap, request)?.status ?? 'offline' };
   }
 
   @Post('aps/:apId/search-devices')
-  searchDevices(@Param('apId') apId: string) {
-    this.findAp(apId);
-    return { ok: true, devices: this.localDevices().filter((item) => item.apId === apId) };
+  searchDevices(@Param('apId') apId: string, @Req() request: Request) {
+    this.assertRowVisible(this.findAp(apId) as BaseStation & Row, request, 'AP not found');
+    return { ok: true, devices: this.localDevices(request).filter((item) => item.apId === apId) };
   }
 
   @Post('aps/:apId/config')
-  configAp(@Param('apId') apId: string, @Body() body: Row) {
-    const ap = this.findAp(apId) as BaseStation & Row;
+  configAp(@Param('apId') apId: string, @Body() body: Row, @Req() request: Request) {
+    const ap = this.assertRowVisible(this.findAp(apId) as BaseStation & Row, request, 'AP not found') as BaseStation & Row;
     const currentConfig = ap.config && typeof ap.config === 'object' ? ap.config as Row : {};
     ap.config = {
       ...(body.config && typeof body.config === 'object' ? body.config as Row : {}),
       autoImportScannedLabels: currentConfig.autoImportScannedLabels === true,
     };
     this.db.save();
-    return this.localAp(ap);
+    return this.localAp(ap, request);
   }
 
   @Post('aps/:apId/unbind-devices')
-  unbindApDevices(@Param('apId') apId: string) {
+  unbindApDevices(@Param('apId') apId: string, @Req() request: Request) {
+    this.assertRowVisible(this.findAp(apId) as BaseStation & Row, request, 'AP not found');
     let count = 0;
     for (const label of this.db.labels.values()) {
       const row = label as Label & Row;
@@ -941,20 +1215,41 @@ export class LocalCloudController {
   }
 
   @Post('aps/:apId/transfer-owner')
-  transferApOwner(@Param('apId') apId: string) {
-    return { ...this.localAp(this.findAp(apId)), transferredDeviceCount: 0, targetUser: this.me() };
+  transferApOwner(@Param('apId') apId: string, @Body() body: Row, @Req() request: Request) {
+    this.requireAdminUser(request);
+    const targetUserId = stringValue(body.targetUserId);
+    const targetUser = this.findUser(targetUserId);
+    const ap = this.findAp(apId) as BaseStation & Row;
+    ap.ownerUserId = targetUserId;
+    let transferredDeviceCount = 0;
+    for (const label of this.db.labels.values()) {
+      const row = label as Label & Row;
+      if (row.apId === apId) {
+        row.ownerUserId = targetUserId;
+        transferredDeviceCount += 1;
+      }
+    }
+    this.db.save();
+    return { ...this.localAp(ap, request), transferredDeviceCount, targetUser: this.localUser(targetUser) };
   }
 
   @Delete('aps/:apId')
-  deleteAp(@Param('apId') apId: string) {
+  deleteAp(@Param('apId') apId: string, @Req() request: Request) {
+    this.assertRowVisible(this.findAp(apId) as BaseStation & Row, request, 'AP not found');
     this.db.baseStations.delete(apId);
+    for (const label of this.db.labels.values()) {
+      const row = label as Label & Row;
+      if (row.apId === apId) {
+        delete row.apId;
+      }
+    }
     this.db.save();
     return { ok: true };
   }
 
   @Get('aps/:apId/heartbeats')
-  apHeartbeats(@Param('apId') apId: string) {
-    const ap = this.findAp(apId);
+  apHeartbeats(@Param('apId') apId: string, @Req() request: Request) {
+    const ap = this.assertRowVisible(this.findAp(apId) as BaseStation & Row, request, 'AP not found');
     return [{
       id: `${ap.id}-latest`,
       createdAt: ap.lastSeenAt ?? now(),
@@ -964,80 +1259,220 @@ export class LocalCloudController {
   }
 
   @Get('tasks')
-  tasks(@Query() query: Row) {
-    return paginate([...this.db.cloudTasks.values()].reverse().map((item) => this.localTask(item, false)), query);
+  tasks(@Query() query: Row, @Req() request: Request) {
+    const tasks = this.filterRowsByOwnerAndKeyword(
+      this.visibleRows([...this.db.cloudTasks.values()], request).reverse(),
+      query,
+      ['id', 'taskType', 'status', 'resultMsg', 'eslDeviceId', 'apId', 'productId', 'templateId'],
+    );
+    const { page, pageSize, start, end } = paginationParams(query);
+    return {
+      items: tasks.slice(start, end).map((item) => this.localTask(item, false)),
+      page,
+      pageSize,
+      total: tasks.length,
+    };
   }
 
   @Get('tasks/:taskId')
-  task(@Param('taskId') taskId: string) {
-    const task = this.db.cloudTasks.get(taskId);
-    if (!task) throw new NotFoundException('Task not found');
+  task(@Param('taskId') taskId: string, @Req() request: Request) {
+    const task = this.assertRowVisible(this.db.cloudTasks.get(taskId) as Row | undefined, request, 'Task not found');
     return this.localTask(task, true);
   }
 
   @Post('tasks/:taskId/retry')
-  async retryTask(@Param('taskId') taskId: string) {
-    const task = this.db.cloudTasks.get(taskId);
-    if (!task) throw new NotFoundException('Task not found');
+  async retryTask(@Param('taskId') taskId: string, @Req() request: Request) {
+    const task = this.assertRowVisible(this.db.cloudTasks.get(taskId) as Row | undefined, request, 'Task not found');
     const retry = await this.createRefreshTask(String(task.eslDeviceId ?? ''), 'retry_refresh', taskId);
     return retry;
   }
 
   @Delete('tasks/:taskId')
-  deleteTask(@Param('taskId') taskId: string) {
-    if (!this.db.cloudTasks.has(taskId)) {
-      throw new NotFoundException('Task not found');
-    }
+  deleteTask(@Param('taskId') taskId: string, @Req() request: Request) {
+    this.assertRowVisible(this.db.cloudTasks.get(taskId) as Row | undefined, request, 'Task not found');
     this.db.cloudTasks.delete(taskId);
     this.db.save();
     return { deleted: true, id: taskId };
   }
 
   @Post('tasks/batch-refresh')
-  async batchRefresh(@Body() body: Row) {
-    const ids = Array.isArray(body.deviceIds) ? body.deviceIds.map(String) : this.localDevices().map((item) => String(item.id));
+  async batchRefresh(@Body() body: Row, @Req() request: Request) {
+    const visibleIds = new Set(this.localDevices(request).map((item) => String(item.id)));
+    const ids = Array.isArray(body.deviceIds)
+      ? body.deviceIds.map(String).filter((id) => visibleIds.has(id))
+      : [...visibleIds];
     const tasks = await this.createRefreshTasksQueued(ids, 'batch_refresh');
     return { ok: true, createdTaskCount: tasks.length, taskIds: tasks.map((task) => String(task.id)) };
   }
 
   @Get('users')
-  users() {
-    return [this.me()];
+  users(@Req() request: Request) {
+    this.requireAdminUser(request);
+    return [...this.db.users.values()].map((user) => this.localUser(user));
   }
 
   @Get('users/invites')
-  invites() {
-    return [];
+  invites(@Req() request: Request) {
+    this.requireAdminUser(request);
+    return [...this.db.userInvites.values()]
+      .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))
+      .map((invite) => this.localInvite(invite));
   }
 
   @Get('users/audit-logs')
-  auditLogs() {
-    return [];
+  auditLogs(@Req() request: Request) {
+    this.requireAdminUser(request);
+    return this.db.auditLogs.slice(0, 200);
+  }
+
+  @Get('users/:userId')
+  userDetail(@Param('userId') userId: string, @Req() request: Request) {
+    this.requireAdminUser(request);
+    const user = this.findUser(userId);
+    if (this.isAdminUser(user)) {
+      throw new NotFoundException('User not found');
+    }
+    const stores = this.userOwnedRows([...this.db.stores.values()] as Array<StoreConfig & Row>, userId);
+    const aps = this.userOwnedRows([...this.db.baseStations.values()] as Array<BaseStation & Row>, userId);
+    const devices = this.userOwnedRows([...this.db.labels.values()] as Array<Label & Row>, userId);
+    const products = this.userOwnedRows([...this.db.cloudProducts.values()], userId);
+    const templates = this.userOwnedRows([...this.db.cloudTemplates.values()], userId);
+    const tasks = this.userOwnedRows([...this.db.cloudTasks.values()], userId);
+
+    return {
+      user: this.localUser(user),
+      counts: {
+        stores: stores.length,
+        aps: aps.length,
+        devices: devices.length,
+        products: products.length,
+        templates: templates.length,
+        tasks: tasks.length,
+      },
+      stores: stores.map((store) => this.localStoreForOwner(store, userId)),
+      aps: aps.map((ap) => this.localApForOwner(ap, userId)),
+      devices: devices.map((device) => this.localDeviceForOwner(device)),
+      products,
+      templates: templates.map((template) => ({
+        ...this.localTemplate(template),
+        useDeviceCount: devices.filter((device) => {
+          if (String(device.templateId ?? '') === String(template.id ?? '')) return true;
+          if (device.templateId) return false;
+          const product = device.productId ? products.find((item) => String(item.id ?? '') === String(device.productId)) : undefined;
+          return String(product?.defaultTemplateId ?? '') === String(template.id ?? '');
+        }).length,
+      })),
+      tasks: tasks
+        .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))
+        .slice(0, 100)
+        .map((task) => this.localTask(task, false)),
+    };
   }
 
   @Post('users/invites')
-  createInvite(@Body() body: Row) {
-    return { id: id('invite'), token: id('token'), username: body.username, role: body.role ?? 'VIEWER', expiresAt: now(), createdAt: now() };
+  createInvite(@Body() body: Row, @Req() request: Request) {
+    this.requireAdminUser(request);
+    const username = stringValue(body.username).trim();
+    if (!username) throw new BadRequestException('Username is required');
+    const storeCode = stringValue(body.storeCode) || [...this.db.stores.values()][0]?.code || '';
+    if (storeCode && !this.db.stores.has(storeCode)) {
+      throw new NotFoundException('Store not found');
+    }
+    if (this.findLoginUser(undefined, username, false)) {
+      throw new BadRequestException('Username already exists');
+    }
+    const existingInvite = [...this.db.userInvites.values()].find((invite) => (
+      String(invite.storeCode ?? '') === storeCode
+      && String(invite.username ?? '') === username
+      && !invite.usedAt
+      && !invite.revokedAt
+      && new Date(String(invite.expiresAt ?? '')).getTime() > Date.now()
+    ));
+    if (existingInvite) {
+      return this.localInvite(existingInvite);
+    }
+    const timestamp = now();
+    const expiresInDays = Math.max(1, Math.min(30, numberValue(body.expiresInDays, 7)));
+    const invite = {
+      id: id('invite'),
+      token: randomUUID().replace(/-/g, ''),
+      storeCode: storeCode || undefined,
+      username,
+      displayName: stringValue(body.displayName) || undefined,
+      email: stringValue(body.email) || undefined,
+      role: normalizeRole(body.role, 'OPERATOR'),
+      expiresAt: new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString(),
+      createdByUserId: this.ensureAdminUser().id,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      usedAt: null,
+      revokedAt: null,
+    };
+    this.db.userInvites.set(invite.id, invite);
+    this.addAuditLog('users', 'create_invite', invite.id, null, this.localInvite(invite));
+    this.db.save();
+    return this.localInvite(invite);
   }
 
   @Post('users/:userId/disable')
-  disableUser() {
-    return this.me();
+  disableUser(@Param('userId') userId: string, @Req() request: Request) {
+    this.requireAdminUser(request);
+    const user = this.findUser(userId);
+    if (normalizeRole(user.role) === 'ADMIN') {
+      throw new BadRequestException('Admin user cannot be disabled');
+    }
+    const before = this.localUser(user);
+    user.status = 'disabled';
+    user.updatedAt = now();
+    this.db.users.set(userId, user);
+    this.addAuditLog('users', 'disable', userId, before, this.localUser(user));
+    this.db.save();
+    return this.localUser(user);
   }
 
   @Post('users/:userId/enable')
-  enableUser() {
-    return this.me();
+  enableUser(@Param('userId') userId: string, @Req() request: Request) {
+    this.requireAdminUser(request);
+    const user = this.findUser(userId);
+    const before = this.localUser(user);
+    user.status = 'active';
+    user.updatedAt = now();
+    this.db.users.set(userId, user);
+    this.addAuditLog('users', 'enable', userId, before, this.localUser(user));
+    this.db.save();
+    return this.localUser(user);
   }
 
   @Post('users/:userId/reset-password')
-  resetPassword() {
-    return this.me();
+  resetPassword(@Param('userId') userId: string, @Body() body: Row, @Req() request: Request) {
+    this.requireAdminUser(request);
+    const password = String(body.password ?? '');
+    if (password.length < 6) {
+      throw new BadRequestException('Password must be at least 6 characters');
+    }
+    const user = this.findUser(userId);
+    const before = this.localUser(user);
+    user.passwordHash = bcrypt.hashSync(password, 10);
+    user.updatedAt = now();
+    this.db.users.set(userId, user);
+    this.addAuditLog('users', 'reset_password', userId, before, this.localUser(user));
+    this.db.save();
+    return this.localUser(user);
   }
 
   @Post('users/invites/:inviteId/revoke')
-  revokeInvite(@Param('inviteId') inviteId: string) {
-    return { id: inviteId, revokedAt: now() };
+  revokeInvite(@Param('inviteId') inviteId: string, @Req() request: Request) {
+    this.requireAdminUser(request);
+    const invite = this.db.userInvites.get(inviteId);
+    if (!invite) throw new NotFoundException('Invite not found');
+    if (!invite.usedAt && !invite.revokedAt) {
+      invite.revokedAt = now();
+      invite.updatedAt = now();
+      this.db.userInvites.set(inviteId, invite);
+      this.addAuditLog('users', 'revoke_invite', inviteId, null, this.localInvite(invite));
+      this.db.save();
+    }
+    return this.localInvite(invite);
   }
 
   @Post('uploads/image')
@@ -1096,6 +1531,8 @@ export class LocalCloudController {
       customFields: input.customFields ?? {},
       defaultTemplateId: input.defaultTemplateId,
       status: input.status ?? 'active',
+      ownerUserId: input.ownerUserId,
+      storeCode: input.storeCode,
       createdAt: stringValue(input.createdAt, timestamp),
       updatedAt: timestamp,
     };
@@ -1121,6 +1558,8 @@ export class LocalCloudController {
       previewImageUrl: stringValue(input.previewImageUrl, this.templatePreviewUrl(templateId)),
       schema: input.schema ?? defaultSchema(input),
       recentVersions: input.recentVersions ?? [],
+      ownerUserId: input.ownerUserId,
+      storeCode: input.storeCode,
       createdAt: stringValue(input.createdAt, timestamp),
       updatedAt: timestamp,
     };
@@ -1134,6 +1573,27 @@ export class LocalCloudController {
     this.db.cloudTemplates.set(template.id, template);
     this.db.save();
     return template;
+  }
+
+  private localTemplate(template: Row, request?: Request): Row {
+    const normalized = this.ensureTemplatePreview(template);
+    const templateId = String(normalized.id ?? '');
+    const useDeviceCount = [...this.db.labels.values()].filter((label) => {
+      const row = label as Label & Row;
+      if (!this.canAccessRow(row, request)) return false;
+      if (String(row.templateId ?? '') === templateId) return true;
+      if (row.templateId) return false;
+      const product = row.productId
+        ? this.visibleRows([...this.db.cloudProducts.values()], request).find((item) => item.id === row.productId)
+        : undefined;
+      return String(product?.defaultTemplateId ?? '') === templateId;
+    }).length;
+
+    return {
+      ...normalized,
+      owner: this.ownerSummary(normalized.ownerUserId),
+      useDeviceCount,
+    };
   }
 
   private async createRefreshTask(deviceId: string, taskType: string, parentTaskId?: string) {
@@ -1150,9 +1610,12 @@ export class LocalCloudController {
       apId,
       productId: (label as Label & Row).productId,
       templateId: (label as Label & Row).templateId,
+      ownerUserId: (label as Label & Row).ownerUserId,
+      owner: this.ownerSummary((label as Label & Row).ownerUserId),
+      storeCode: label.storeCode,
       payload: { labelId: label.id, localRenderer: true },
       renderResult: {},
-      retryCount: parentTaskId ? 1 : 0,
+      retryCount: 0,
       status: 'queued',
       parentTaskId,
       triggeredAt: timestamp,
@@ -1276,9 +1739,31 @@ export class LocalCloudController {
         continue;
       }
 
+      const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
+      if (this.taskHasSuccessfulRefreshEvent(task)) {
+        task.status = 'success';
+        task.resultMsg = '刷新成功，基站已完成本次下发。';
+        task.payload = { ...payload, retryInFlight: false };
+        task.updatedAt = now();
+        this.db.cloudTasks.set(taskId, task);
+        continue;
+      }
+
+      if (payload.autoRetryExhausted === true) {
+        task.status = 'failed';
+        task.resultMsg = '刷新失败：已多次自动唤醒并重试，仍未收到价签确认。';
+        task.payload = { ...payload, retryInFlight: false };
+        task.updatedAt = now();
+        this.db.cloudTasks.set(taskId, task);
+        continue;
+      }
+
       task.status = 'queued';
       task.resultMsg = '服务重启后已恢复到刷新队列';
       task.updatedAt = now();
+      if (payload.retryInFlight === true) {
+        task.payload = { ...payload, retryInFlight: false };
+      }
       task.apId = this.resolveDeliveryApId(label);
       this.db.cloudTasks.set(taskId, task);
       await this.enqueueRefreshTask(String(task.apId || ''), taskId);
@@ -1289,21 +1774,42 @@ export class LocalCloudController {
     }
   }
 
-  private resolveEffectiveTemplateForLabel(label: Label & Row) {
-    const product = label.productId ? this.db.cloudProducts.get(String(label.productId)) ?? null : null;
+  private taskHasSuccessfulRefreshEvent(task: Row) {
+    const events = Array.isArray(task.events) ? task.events as Row[] : [];
+    return events.some((event) => {
+      const message = String(event.message ?? event.userMessage ?? '');
+      const technical = event.trace && typeof event.trace === 'object'
+        ? (event.trace as Row).technical as Row | undefined
+        : undefined;
+      return message.includes('刷新成功')
+        || (
+          String(technical?.replyType ?? '') === 'READ_WRITE_SVC'
+          && String(technical?.cmdType ?? '') === 'DIS_CONN'
+          && Number(technical?.errno) === 0
+          && Number(technical?.tasksCount) === 0
+        );
+    });
+  }
+
+  private resolveEffectiveTemplateForLabel(label: Label & Row, request?: Request) {
+    const product = label.productId
+      ? this.visibleRows([...this.db.cloudProducts.values()], request).find((item) => item.id === label.productId) ?? null
+      : null;
     const templateId = stringValue(label.templateId, stringValue(product?.defaultTemplateId));
-    return templateId ? this.db.cloudTemplates.get(templateId) ?? null : null;
+    return templateId
+      ? this.visibleRows([...this.db.cloudTemplates.values()], request).find((item) => item.id === templateId) ?? null
+      : null;
   }
 
   private isRefreshableTemplate(template: Row | null | undefined) {
     return Boolean(template && stringValue(template.status, 'draft') === 'published');
   }
 
-  private async refreshLinkedProductDevices(productId: string, taskType: string) {
+  private async refreshLinkedProductDevices(productId: string, taskType: string, request?: Request) {
     const labels = [...this.db.labels.values()]
       .map((label) => label as Label & Row)
-      .filter((label) => String(label.productId ?? '') === productId);
-    const refreshableLabels = labels.filter((label) => this.isRefreshableTemplate(this.resolveEffectiveTemplateForLabel(label)));
+      .filter((label) => String(label.productId ?? '') === productId && this.canAccessRow(label, request));
+    const refreshableLabels = labels.filter((label) => this.isRefreshableTemplate(this.resolveEffectiveTemplateForLabel(label, request)));
     const tasks = await this.createRefreshTasksQueued(refreshableLabels.map((label) => label.id), taskType);
     const taskIds = tasks.map((task) => String(task.id));
     const missingTemplateCount = labels.length - refreshableLabels.length;
@@ -1323,10 +1829,10 @@ export class LocalCloudController {
     };
   }
 
-  private async refreshTemplateLinkedDevices(templateId: string, taskType: string) {
+  private async refreshTemplateLinkedDevices(templateId: string, taskType: string, request?: Request) {
     const labels = [...this.db.labels.values()]
       .map((label) => label as Label & Row)
-      .filter((label) => String(label.templateId ?? '') === templateId);
+      .filter((label) => String(label.templateId ?? '') === templateId && this.canAccessRow(label, request));
     const tasks = await this.createRefreshTasksQueued(labels.map((label) => label.id), taskType);
     const taskIds = tasks.map((task) => String(task.id));
     return {
@@ -1448,7 +1954,7 @@ export class LocalCloudController {
     const retryEnabled = readBool(process.env.ESL_REFRESH_AUTO_RETRY, true);
     if (!retryEnabled) return;
 
-    const delayMs = Math.max(3000, Math.min(60000, Number(process.env.ESL_REFRESH_RETRY_DELAY_MS ?? 8000)));
+    const delayMs = Math.max(3000, Math.min(60000, Number(process.env.ESL_REFRESH_RETRY_DELAY_MS ?? 5000)));
     setTimeout(() => {
       void this.retryRefreshIfNeeded(labelId, taskId).catch((error) => {
         this.db.recordRequest({
@@ -1466,45 +1972,125 @@ export class LocalCloudController {
     if (!task || task.parentTaskId) return;
     const status = String(task.status ?? '');
     if (status === 'success') return;
-    if (task.childTaskId) {
-      const child = this.db.cloudTasks.get(String(task.childTaskId));
-      if (child && !['failed', 'skipped'].includes(String(child.status ?? ''))) return;
+
+    const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
+    if (payload.retryInFlight === true) {
+      const lockedAtMs = Date.parse(String(payload.lastAutoRetryAt ?? ''));
+      const lockIsFresh = Number.isFinite(lockedAtMs) && Date.now() - lockedAtMs < AUTO_RETRY_LOCK_TTL_MS;
+      if (lockIsFresh) return;
+      task.payload = { ...payload, retryInFlight: false };
+      task.updatedAt = now();
+      this.db.cloudTasks.set(taskId, task);
+      this.db.save();
     }
 
     const retryCount = numberValue(task.retryCount, 0);
-    const maxRetries = Math.max(0, Math.min(3, Number(process.env.ESL_REFRESH_AUTO_RETRY_MAX ?? 1)));
-    if (retryCount >= maxRetries) return;
+    const maxRetries = Math.max(0, Math.min(5, Number(process.env.ESL_REFRESH_AUTO_RETRY_MAX ?? 3)));
+    if (retryCount >= maxRetries) {
+      task.status = 'failed';
+      task.resultMsg = `刷新失败：已自动唤醒并重试 ${maxRetries} 次，仍未收到价签确认。`;
+      task.updatedAt = now();
+      task.payload = { ...payload, retryInFlight: false, autoRetryExhausted: true };
+      this.db.cloudTasks.set(taskId, task);
+      this.db.save();
+      return;
+    }
 
-    const retryableStatuses = new Set(['queued', 'sending', 'failed', 'timeout']);
+    const retryableStatuses = new Set(['sending', 'failed', 'timeout']);
     if (!retryableStatuses.has(status)) return;
 
     const label = this.db.labels.get(labelId);
-    if (!label) return;
+    if (!label) {
+      task.status = 'failed';
+      task.resultMsg = '刷新失败：标签不存在，无法重试。';
+      task.updatedAt = now();
+      task.payload = { ...payload, retryInFlight: false };
+      this.db.cloudTasks.set(taskId, task);
+      this.db.save();
+      return;
+    }
 
     const apId = this.resolveDeliveryApId(label);
-    if (apId) {
+    if (!apId) {
+      task.status = 'failed';
+      task.resultMsg = '刷新失败：没有可用基站，无法重试。';
+      task.updatedAt = now();
+      task.payload = { ...payload, retryInFlight: false };
+      this.db.cloudTasks.set(taskId, task);
+      this.db.save();
+      return;
+    }
+
+    const nextRetryCount = retryCount + 1;
+    task.retryCount = nextRetryCount;
+    task.status = 'sending';
+    task.resultMsg = `正在重新唤醒价签并第 ${nextRetryCount} 次补发刷新。`;
+    task.updatedAt = now();
+    task.payload = { ...payload, retryInFlight: true, lastAutoRetryAt: now() };
+    this.db.cloudTasks.set(taskId, task);
+    this.db.save();
+
+    try {
       await this.runSilentWake([labelId], {
         apId,
-        waitMs: Math.max(3000, Math.min(12000, Number(process.env.ESL_REFRESH_RETRY_WAKE_WAIT_MS ?? 5000))),
+        waitMs: Math.max(3000, Math.min(12000, Number(process.env.ESL_REFRESH_RETRY_WAKE_WAIT_MS ?? 4500))),
         psmDurationMs: Math.max(3000, Math.min(30000, Number(process.env.ESL_REFRESH_RETRY_PSM_DURATION_MS ?? 12000))),
         sendMqtt: true,
         sendWs: true,
         disconnectAfterProbe: true,
       });
-    }
 
-    const freshTask = this.db.cloudTasks.get(taskId);
-    if (!freshTask || String(freshTask.status ?? '') === 'success') {
-      return;
-    }
+      const freshTask = this.db.cloudTasks.get(taskId);
+      if (!freshTask || String(freshTask.status ?? '') === 'success') {
+        return;
+      }
 
-    const retry = await this.createRefreshTask(labelId, 'auto_retry_after_wake', taskId);
-    task.retryCount = retryCount + 1;
-    task.childTaskId = retry.id;
-    task.resultMsg = `${stringValue(task.resultMsg, '刷新未确认成功')}；已自动打开监听窗口并补发一次刷新任务 ${retry.id}`;
-    task.updatedAt = now();
-    this.db.cloudTasks.set(taskId, task);
-    this.db.save();
+      const render = await this.renderTemplateForLabel(label);
+      const delivery = await this.deliverRefreshTask(label, render, task.id);
+      freshTask.renderResult = {
+        width: render.width,
+        height: render.height,
+        colorMode: render.colorMode,
+        previewImageUrl: render.previewImageUrl,
+      };
+      freshTask.status = delivery.ok ? 'sending' : 'failed';
+      freshTask.resultMsg = delivery.ok
+        ? `已自动唤醒并第 ${nextRetryCount} 次重新下发，正在等待价签确认。`
+        : delivery.reason;
+      freshTask.delivery = {
+        ...(delivery as Row),
+        retryAttempt: nextRetryCount,
+      };
+      freshTask.payload = {
+        ...(freshTask.payload && typeof freshTask.payload === 'object' ? freshTask.payload as Row : {}),
+        retryInFlight: false,
+        lastAutoRetryAt: now(),
+      };
+      freshTask.updatedAt = now();
+      if (delivery.commandId) {
+        freshTask.payload = { ...(freshTask.payload as Row), commandId: delivery.commandId };
+      }
+      this.db.cloudTasks.set(taskId, freshTask);
+      this.db.save();
+      if (String(freshTask.status ?? '') !== 'success') {
+        this.scheduleRefreshRetry(labelId, taskId);
+      }
+    } catch (error) {
+      const failedTask = this.db.cloudTasks.get(taskId) ?? task;
+      failedTask.status = 'failed';
+      failedTask.resultMsg = `自动唤醒重试失败：${error instanceof Error ? error.message : String(error)}`;
+      failedTask.payload = {
+        ...(failedTask.payload && typeof failedTask.payload === 'object' ? failedTask.payload as Row : {}),
+        retryInFlight: false,
+        lastAutoRetryAt: now(),
+      };
+      failedTask.updatedAt = now();
+      this.db.cloudTasks.set(taskId, failedTask);
+      this.db.save();
+      if (numberValue(failedTask.retryCount, 0) < maxRetries) {
+        this.scheduleRefreshRetry(labelId, taskId);
+      }
+    }
   }
 
   private startLabelKeepaliveLoops() {
@@ -1724,10 +2310,18 @@ export class LocalCloudController {
       const cmd = payload?.cmd && typeof payload.cmd === 'object' ? payload.cmd as Row : undefined;
       const res = payload?.res && typeof payload.res === 'object' ? payload.res as Row : undefined;
       const cmdType = typeof cmd?.type === 'string' ? cmd.type : undefined;
-      const errno = typeof res?.errno === 'number' ? res.errno : undefined;
+      const errno = typeof res?.errno === 'number'
+        ? res.errno
+        : typeof payload?.errno === 'number'
+          ? payload.errno
+          : undefined;
+      const tasksCount = Number(payload?.tasks_count ?? payload?.tasksCount);
       const traceStatus = typeof row?.status === 'string' ? row.status : undefined;
 
-      if ((cmdType === 'CONN_DEV' || cmdType === 'DIS_CONN') && errno === 0) {
+      if (
+        ((cmdType === 'CONN_DEV' || cmdType === 'DIS_CONN') && errno === 0)
+        || (cmdType === 'DIS_CONN' && (errno === 0 || errno === undefined) && tasksCount === 0)
+      ) {
         return {
           labelId,
           trackingId,
@@ -1920,16 +2514,17 @@ export class LocalCloudController {
   }
 
   private resolveScreenPreset(render: RenderedTemplateImage, labelId?: string) {
+    const exact = SCREEN_PRESETS.find((preset) => preset.width === render.width && preset.height === render.height);
+    if (exact) return exact;
+    const rotated = SCREEN_PRESETS.find((preset) => preset.width === render.height && preset.height === render.width);
+    if (rotated) return rotated;
+
     const normalizedLabelId = stringValue(labelId).toLowerCase();
     const explicitKey = LABEL_PRESET_KEYS[normalizedLabelId]
       ?? LABEL_PREFIX_PRESET_KEYS.find((item) => normalizedLabelId.startsWith(item.prefix))?.key;
     const explicit = explicitKey ? SCREEN_PRESETS.find((preset) => preset.key === explicitKey) : undefined;
     if (explicit) return explicit;
 
-    const exact = SCREEN_PRESETS.find((preset) => preset.width === render.width && preset.height === render.height);
-    if (exact) return exact;
-    const rotated = SCREEN_PRESETS.find((preset) => preset.width === render.height && preset.height === render.width);
-    if (rotated) return rotated;
     return SCREEN_PRESETS[0];
   }
 
@@ -2238,10 +2833,168 @@ export class LocalCloudController {
     });
   }
 
-  private localProducts(): Row[] {
-    const products = [...this.db.cloudProducts.values()];
+  private currentUser(request?: Request) {
+    this.ensureAdminUser();
+    const auth = request?.headers?.authorization ?? '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+    const decoded = token ? this.jwt.decode(token) as Row | null : null;
+    const userId = stringValue(decoded?.sub);
+    return (userId ? this.db.users.get(userId) : undefined) ?? this.ensureAdminUser();
+  }
+
+  private requireAdminUser(request?: Request) {
+    const user = this.currentUser(request);
+    if (!this.isAdminUser(user)) {
+      throw new ForbiddenException('Admin access required');
+    }
+    return user;
+  }
+
+  private isAdminUser(user: Row) {
+    return normalizeRole(user.role) === 'ADMIN';
+  }
+
+  private rowOwnerId(row?: Row) {
+    return String(row?.ownerUserId ?? '');
+  }
+
+  private canAccessRow(row: Row | undefined, request?: Request) {
+    if (!row) return false;
+    const user = this.currentUser(request);
+    if (!this.rowOwnerId(row)) {
+      this.ensureOwnershipBackfill();
+    }
+    return this.isAdminUser(user) || this.rowOwnerId(row) === String(user.id ?? '');
+  }
+
+  private assertRowVisible<T extends Row>(row: T | undefined, request?: Request, message = 'Resource not found'): T {
+    if (!row || !this.canAccessRow(row, request)) {
+      throw new NotFoundException(message);
+    }
+    return row;
+  }
+
+  private visibleRows<T extends Row>(rows: T[], request?: Request) {
+    const user = this.currentUser(request);
+    if (this.isAdminUser(user)) return rows;
+    const userId = String(user.id ?? '');
+    return rows.filter((row) => String(row.ownerUserId ?? '') === userId);
+  }
+
+  private userOwnedRows<T extends Row>(rows: T[], userId: string) {
+    this.ensureOwnershipBackfill();
+    return rows.filter((row) => String(row.ownerUserId ?? '') === userId);
+  }
+
+  private ownerSummary(ownerUserId: unknown) {
+    const userId = stringValue(ownerUserId);
+    const user = userId ? this.db.users.get(userId) : undefined;
+    return user ? {
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      role: normalizeRole(user.role),
+    } : null;
+  }
+
+  private filterRowsByOwnerAndKeyword<T extends Row>(rows: T[], query: Row, fields: string[]) {
+    const ownerUserId = stringValue(query.ownerUserId);
+    const keyword = stringValue(query.keyword).toLowerCase();
+    return rows.filter((row) => {
+      if (ownerUserId && String(row.ownerUserId ?? '') !== ownerUserId) return false;
+      if (!keyword) return true;
+      const haystack = fields
+        .map((field) => stringValue(row[field]).toLowerCase())
+        .join(' ');
+      return haystack.includes(keyword);
+    });
+  }
+
+  private bodyIds(body: Row, key: string) {
+    return Array.isArray(body[key])
+      ? (body[key] as unknown[]).map((item) => stringValue(item)).filter(Boolean)
+      : [];
+  }
+
+  private productDeleteImpactPayload(product: Row) {
+    const productId = String(product.id ?? '');
+    const devices = [...this.db.labels.values()]
+      .filter((label) => String((label as Label & Row).productId ?? '') === productId)
+      .map((label) => ({ id: label.id, name: label.title }));
+    const tasks = [...this.db.cloudTasks.values()]
+      .filter((task) => String(task.productId ?? '') === productId)
+      .map((task) => ({ id: task.id, status: task.status }));
+    return {
+      product: { id: product.id, name: product.name, sku: product.sku },
+      devices,
+      tasks,
+      summary: {
+        deviceCount: devices.length,
+        taskCount: tasks.length,
+      },
+    };
+  }
+
+  private templateDeleteImpactPayload(template: Row) {
+    const templateId = String(template.id ?? '');
+    const products = [...this.db.cloudProducts.values()]
+      .filter((product) => String(product.defaultTemplateId ?? '') === templateId)
+      .map((product) => ({ id: product.id, name: product.name, sku: product.sku }));
+    const devices = [...this.db.labels.values()]
+      .filter((label) => String((label as Label & Row).templateId ?? '') === templateId)
+      .map((label) => ({ id: label.id, name: label.title }));
+    const tasks = [...this.db.cloudTasks.values()]
+      .filter((task) => String(task.templateId ?? '') === templateId)
+      .map((task) => ({ id: task.id, status: task.status }));
+    return {
+      template: { id: template.id, name: template.name, code: template.code },
+      products,
+      devices,
+      tasks,
+      summary: {
+        productCount: products.length,
+        deviceCount: devices.length,
+        taskCount: tasks.length,
+      },
+    };
+  }
+
+  private deviceDeleteImpactPayload(label: Label & Row) {
+    const product = label.productId ? this.db.cloudProducts.get(String(label.productId)) : undefined;
+    const template = label.templateId ? this.db.cloudTemplates.get(String(label.templateId)) : undefined;
+    const ap = label.apId ? this.db.baseStations.get(String(label.apId)) : undefined;
+    const tasks = [...this.db.cloudTasks.values()]
+      .filter((task) => String(task.eslDeviceId ?? '') === String(label.id))
+      .map((task) => ({ id: task.id, status: task.status }));
+    return {
+      device: { id: label.id, name: label.title },
+      product: product ? { id: product.id, name: product.name, sku: product.sku } : null,
+      template: template ? { id: template.id, name: template.name, code: template.code } : null,
+      ap: ap ? { id: ap.id, name: ap.name } : null,
+      tasks,
+      summary: {
+        hasProduct: Boolean(product),
+        hasTemplate: Boolean(template),
+        hasAp: Boolean(ap),
+        taskCount: tasks.length,
+      },
+    };
+  }
+
+  private ownerUserIdForWrite(body: Row, request?: Request) {
+    const user = this.currentUser(request);
+    if (this.isAdminUser(user)) {
+      const requested = stringValue(body.ownerUserId);
+      if (requested && this.db.users.has(requested)) return requested;
+    }
+    return String(user.id ?? '');
+  }
+
+  private localProducts(request?: Request): Row[] {
+    const products = this.visibleRows([...this.db.cloudProducts.values()], request);
     for (const label of this.db.labels.values()) {
       const row = label as Label & Row;
+      if (!this.canAccessRow(row, request)) continue;
       if (row.productId && products.some((item) => item.id === row.productId)) continue;
       products.push({
         id: row.productId ?? `product_${label.id}`,
@@ -2250,41 +3003,228 @@ export class LocalCloudController {
         name: label.title,
         price: label.price,
         status: 'active',
+        ownerUserId: row.ownerUserId,
         createdAt: label.updatedAt,
         updatedAt: label.updatedAt,
       });
     }
-    return products;
+    return products.map((product) => ({
+      ...product,
+      owner: this.ownerSummary(product.ownerUserId),
+      defaultTemplate: product.defaultTemplateId ? this.db.cloudTemplates.get(String(product.defaultTemplateId)) ?? null : null,
+      bindDeviceCount: [...this.db.labels.values()].filter((label) => String((label as Label & Row).productId ?? '') === String(product.id ?? '')).length,
+    }));
   }
 
-  private localStores() {
-    return [...this.db.stores.values()].map((store) => this.localStore(store));
+  private localStores(request?: Request) {
+    return this.visibleRows([...this.db.stores.values()] as Array<StoreConfig & Row>, request).map((store) => this.localStore(store, request));
   }
 
-  private localStore(store: StoreConfig) {
-    const aps = [...this.db.baseStations.values()].filter((ap) => ap.storeCode === store.code);
-    const labels = [...this.db.labels.values()].filter((label) => label.storeCode === store.code);
+  private localStore(store: StoreConfig, request?: Request) {
+    const aps = [...this.db.baseStations.values()].filter((ap) => ap.storeCode === store.code && this.canAccessRow(ap as BaseStation & Row, request));
+    const labels = [...this.db.labels.values()].filter((label) => label.storeCode === store.code && this.canAccessRow(label as Label & Row, request));
     const onlineAps = aps.filter((ap) => ap.status === 'online' && isRecentActivity(ap.lastSeenAt));
     const { passwordHash: _passwordHash, ...safeStore } = store;
     return {
       ...safeStore,
       address: store.address ?? '',
+      owner: this.ownerSummary((store as StoreConfig & Row).ownerUserId),
       apCount: aps.length,
       onlineApCount: onlineAps.length,
       deviceCount: labels.length,
     };
   }
 
-  private localDevices(): LocalDevice[] {
-    return [...this.db.labels.values()].map((label) => this.localDevice(label));
+  private localStoreForOwner(store: StoreConfig, ownerUserId: string) {
+    const aps = [...this.db.baseStations.values()].filter((ap) => ap.storeCode === store.code && String((ap as BaseStation & Row).ownerUserId ?? '') === ownerUserId);
+    const labels = [...this.db.labels.values()].filter((label) => label.storeCode === store.code && String((label as Label & Row).ownerUserId ?? '') === ownerUserId);
+    const onlineAps = aps.filter((ap) => ap.status === 'online' && isRecentActivity(ap.lastSeenAt));
+    const { passwordHash: _passwordHash, ...safeStore } = store;
+    return {
+      ...safeStore,
+      address: store.address ?? '',
+      owner: this.ownerSummary((store as StoreConfig & Row).ownerUserId),
+      apCount: aps.length,
+      onlineApCount: onlineAps.length,
+      deviceCount: labels.length,
+    };
   }
 
-  private filterDevices(devices: LocalDevice[], query: Row) {
+  private ensureAdminUser() {
+    const existing = [...this.db.users.values()].find((user) => (
+      normalizeRole(user.role) === 'ADMIN'
+      && String(user.username ?? '') === 'admin'
+    ));
+    if (existing) return existing;
+
+    const store = [...this.db.stores.values()][0];
+    const timestamp = now();
+    const user = {
+      id: store?.id ?? 'local-admin',
+      storeCode: store?.code,
+      username: store?.username ?? 'admin',
+      displayName: store?.name ?? 'Local ESL Cloud',
+      email: '',
+      role: 'ADMIN',
+      status: 'active',
+      passwordHash: store?.passwordHash ?? bcrypt.hashSync('admin123456', 10),
+      createdAt: store?.createdAt ?? timestamp,
+      updatedAt: store?.updatedAt ?? timestamp,
+    };
+    this.db.users.set(String(user.id), user);
+    return user;
+  }
+
+  private ensureOwnershipBackfill() {
+    this.ensureAdminUser();
+    const snapshot = {
+      stores: [...this.db.stores.values()],
+      baseStations: [...this.db.baseStations.values()],
+      labels: [...this.db.labels.values()],
+      cloudProducts: [...this.db.cloudProducts.values()],
+      cloudTemplates: [...this.db.cloudTemplates.values()],
+      cloudTasks: [...this.db.cloudTasks.values()],
+      users: [...this.db.users.values()],
+    };
+    const before = ownershipFingerprint(snapshot);
+    migrateLegacyOwners(snapshot);
+    const after = ownershipFingerprint(snapshot);
+    if (before !== after) {
+      this.db.save();
+    }
+  }
+
+
+  private findLoginUser(storeCode: unknown, username: string, required = true) {
+    this.ensureAdminUser();
+    const user = [...this.db.users.values()].find((item) => (
+      String(item.username ?? '') === username
+      && (!storeCode || String(item.storeCode ?? '') === String(storeCode))
+    ));
+    if (!user && required) throw new NotFoundException('User not found');
+    return user;
+  }
+
+  private findUser(userId: string) {
+    this.ensureAdminUser();
+    const user = this.db.users.get(userId);
+    if (!user) throw new NotFoundException('User not found');
+    return user;
+  }
+
+  private localUser(user: Row) {
+    return {
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      email: user.email,
+      role: normalizeRole(user.role),
+      status: stringValue(user.status, 'active'),
+      lastLoginAt: user.lastLoginAt,
+      createdAt: user.createdAt,
+    };
+  }
+
+  private findInviteByToken(token: string) {
+    const invite = [...this.db.userInvites.values()].find((item) => String(item.token ?? '') === token);
+    if (!invite) throw new NotFoundException('Invite not found');
+    return invite;
+  }
+
+  private assertInviteUsable(invite: Row) {
+    if (invite.revokedAt) throw new BadRequestException('Invite has been revoked');
+    if (invite.usedAt) throw new BadRequestException('Invite has already been used');
+    const expiresAt = new Date(String(invite.expiresAt ?? '')).getTime();
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      throw new BadRequestException('Invite has expired');
+    }
+  }
+
+  private publicInvite(invite: Row) {
+    return {
+      username: invite.username,
+      displayName: invite.displayName,
+      email: invite.email,
+      role: normalizeRole(invite.role),
+      expiresAt: invite.expiresAt,
+    };
+  }
+
+  private localInvite(invite: Row) {
+    return {
+      id: invite.id,
+      token: invite.token,
+      username: invite.username,
+      displayName: invite.displayName,
+      email: invite.email,
+      role: normalizeRole(invite.role),
+      expiresAt: invite.expiresAt,
+      usedAt: invite.usedAt ?? null,
+      revokedAt: invite.revokedAt ?? null,
+      createdByUserId: invite.createdByUserId ?? null,
+      createdAt: invite.createdAt,
+      registerPath: `/register?token=${invite.token}`,
+    };
+  }
+
+  private addAuditLog(moduleName: string, action: string, targetId: unknown, beforeJson: unknown, afterJson: unknown) {
+    this.db.auditLogs.unshift({
+      id: id('audit'),
+      module: moduleName,
+      action,
+      targetId: targetId == null ? null : String(targetId),
+      operatorId: this.ensureAdminUser().id,
+      beforeJson,
+      afterJson,
+      createdAt: now(),
+    });
+    this.db.auditLogs.splice(1000);
+  }
+
+  private localDevices(request?: Request): LocalDevice[] {
+    return this.visibleRows([...this.db.labels.values()] as Array<Label & Row>, request).map((label) => this.localDevice(label, true, request, true));
+  }
+
+  private visibleDeviceLabels(request?: Request) {
+    return this.visibleRows([...this.db.labels.values()] as Array<Label & Row>, request);
+  }
+
+  private filterDeviceLabels(labels: Array<Label & Row>, query: Row, request?: Request) {
     const storeCode = stringValue(query.storeCode);
     const apId = stringValue(query.apId);
+    const ownerUserId = stringValue(query.ownerUserId);
+    const keyword = stringValue(query.keyword).toLowerCase();
+    return labels.filter((label) => {
+      const ap = label.apId ? this.findAp(String(label.apId), false) : undefined;
+      if (ap && !this.canAccessRow(ap as unknown as Row, request)) return false;
+      if (ownerUserId && String(label.ownerUserId ?? '') !== ownerUserId) return false;
+      if (storeCode && label.storeCode !== storeCode && ap?.storeCode !== storeCode) return false;
+      if (apId && label.apId !== apId) return false;
+      if (!keyword) return true;
+      const haystack = [
+        label.id,
+        label.title,
+        label.status,
+        label.storeCode,
+        label.sku,
+        label.productId,
+        label.templateId,
+        ap?.name,
+        ap?.id,
+      ].map((item) => stringValue(item).toLowerCase()).join(' ');
+      return haystack.includes(keyword);
+    });
+  }
+
+  private filterDevices(devices: LocalDevice[], query: Row, request?: Request) {
+    const storeCode = stringValue(query.storeCode);
+    const apId = stringValue(query.apId);
+    const ownerUserId = stringValue(query.ownerUserId);
     const keyword = stringValue(query.keyword).toLowerCase();
     return devices.filter((device) => {
       const ap = device.apId ? this.findAp(String(device.apId), false) : undefined;
+      if (ap && !this.canAccessRow(ap as unknown as Row, request)) return false;
+      if (ownerUserId && String(device.ownerUserId ?? '') !== ownerUserId) return false;
       if (storeCode && device.storeCode !== storeCode && ap?.storeCode !== storeCode) return false;
       if (apId && device.apId !== apId) return false;
       if (keyword) {
@@ -2303,6 +3243,61 @@ export class LocalCloudController {
     });
   }
 
+  private localDeviceListItem(label: Label & Row, request?: Request): LocalDevice {
+    const storedProduct = label.productId ? this.db.cloudProducts.get(String(label.productId)) as Row | undefined : undefined;
+    const storedTemplate = label.templateId ? this.db.cloudTemplates.get(String(label.templateId)) as Row | undefined : undefined;
+    const product = storedProduct && this.canAccessRow(storedProduct, request)
+      ? storedProduct
+      : null;
+    const template = storedTemplate && this.canAccessRow(storedTemplate, request)
+      ? storedTemplate
+      : null;
+    const ap = label.apId ? this.findAp(String(label.apId), false) : undefined;
+    const preset = this.resolveDevicePreset(stringValue(label.deviceType), template, label.id);
+    const activeRecently = isRecentActivity(label.updatedAt);
+    const status = activeRecently && label.status !== 'idle' ? label.status : 'offline';
+    return {
+      id: label.id,
+      eslCode: label.id,
+      storeCode: label.storeCode,
+      storeName: this.db.stores.get(label.storeCode)?.name ?? label.storeCode,
+      name: label.title,
+      ownerUserId: label.ownerUserId,
+      owner: this.ownerSummary(label.ownerUserId),
+      apId: label.apId,
+      productId: label.productId,
+      templateId: label.templateId,
+      deviceType: stringValue(label.deviceType, stringValue(template?.deviceType, preset.deviceType)),
+      screenWidth: numberValue(label.screenWidth, numberValue(template?.width, preset.width)),
+      screenHeight: numberValue(label.screenHeight, numberValue(template?.height, preset.height)),
+      battery: label.battery ?? 100,
+      signal: label.rssi ?? 0,
+      bindStatus: label.productId || label.templateId ? 'bound' : 'unbound',
+      status,
+      lastRefreshAt: label.updatedAt,
+      createdAt: label.updatedAt,
+      updatedAt: label.updatedAt,
+      product: product ? {
+        id: product.id,
+        name: product.name,
+        sku: product.sku,
+        ownerUserId: product.ownerUserId,
+        owner: this.ownerSummary(product.ownerUserId),
+      } : null,
+      template: template ? {
+        id: template.id,
+        name: template.name,
+        code: template.code,
+        deviceType: template.deviceType,
+        width: template.width,
+        height: template.height,
+        ownerUserId: template.ownerUserId,
+        owner: this.ownerSummary(template.ownerUserId),
+      } : null,
+      ap: ap && this.canAccessRow(ap as unknown as Row, request) ? this.localApSummary(ap) : null,
+    };
+  }
+
   private localTask(task: Row, includeDetail = false) {
     const delivery = task.delivery && typeof task.delivery === 'object' ? task.delivery as Row : {};
     const protocol = delivery.protocol && typeof delivery.protocol === 'object' ? delivery.protocol as Row : undefined;
@@ -2316,6 +3311,8 @@ export class LocalCloudController {
       apId: task.apId,
       productId: task.productId,
       templateId: task.templateId,
+      ownerUserId: task.ownerUserId,
+      owner: this.ownerSummary(task.ownerUserId),
       payload: task.payload,
       renderResult: {
         width: renderResult.width,
@@ -2391,6 +3388,7 @@ export class LocalCloudController {
     if (status === 'rendering') return '正在生成价签画面。';
     if (status === 'sending') {
       if (taskType === 'auto_retry_after_wake') return '正在补发刷新，请稍等。';
+      if (result.includes('自动唤醒') || result.includes('重新唤醒') || result.includes('重新下发')) return '后台正在唤醒价签并重试刷新。';
       return '已发送到基站，正在等待结果。';
     }
     if (status === 'timeout') return '等待基站确认超时，请稍后重试。';
@@ -2399,15 +3397,24 @@ export class LocalCloudController {
       if (result.includes('WebSocket 不可用') || result.includes('MQTT 发布失败')) return '基站连接不可用，刷新未发送。';
       if (result.includes('标签不存在')) return '标签不存在，任务无法继续。';
       if (result.includes('设备执行失败')) return '价签返回失败，请重试。';
+      if (result.includes('已自动唤醒并重试')) return '多次自动重试后仍未成功。';
       return '任务失败，请重试。';
     }
     return result ? '任务状态已更新。' : '等待处理。';
   }
 
-  private localDevice(label: Label, includeAp = true): LocalDevice {
+  private localDevice(label: Label, includeAp = true, request?: Request, compactAp = false): LocalDevice {
     const row = label as Label & Row;
-    const product = row.productId ? this.db.cloudProducts.get(String(row.productId)) ?? null : null;
-    const template = row.templateId ? this.db.cloudTemplates.get(String(row.templateId)) ?? null : null;
+    const product = row.productId
+      ? this.visibleRows([...this.db.cloudProducts.values()], request).map((item): Row => ({
+        ...item,
+        owner: this.ownerSummary(item.ownerUserId),
+      })).find((item) => item.id === row.productId) ?? null
+      : null;
+    const template = row.templateId
+      ? this.visibleRows([...this.db.cloudTemplates.values()], request).map((item) => this.localTemplate(item, request)).find((item) => item.id === row.templateId) ?? null
+      : null;
+    const ap = includeAp && label.apId ? this.findAp(label.apId, false) : undefined;
     const preset = this.resolveDevicePreset(stringValue(row.deviceType), template, label.id);
     const activeRecently = isRecentActivity(label.updatedAt);
     const status = activeRecently && label.status !== 'idle' ? label.status : 'offline';
@@ -2417,6 +3424,8 @@ export class LocalCloudController {
       storeCode: label.storeCode,
       storeName: this.db.stores.get(label.storeCode)?.name ?? label.storeCode,
       name: label.title,
+      ownerUserId: (label as Label & Row).ownerUserId,
+      owner: this.ownerSummary((label as Label & Row).ownerUserId),
       apId: label.apId,
       productId: row.productId,
       templateId: row.templateId,
@@ -2432,17 +3441,46 @@ export class LocalCloudController {
       updatedAt: label.updatedAt,
       product,
       template,
-      ap: includeAp && label.apId ? this.localAp(this.findAp(label.apId, false)) : null,
+      ap: includeAp && ap && this.canAccessRow(ap as unknown as Row, request)
+        ? (compactAp ? this.localApSummary(ap) : this.localAp(ap, request))
+        : null,
     };
   }
 
-  private localAps(): LocalAp[] {
-    return [...this.db.baseStations.values()].map((ap) => this.localAp(ap));
+  private localApSummary(ap: BaseStation) {
+    const row = ap as BaseStation & Row;
+    const online = ap.status === 'online' && isRecentActivity(ap.lastSeenAt);
+    return {
+      id: ap.id,
+      apCode: ap.id,
+      storeCode: ap.storeCode,
+      storeName: this.db.stores.get(ap.storeCode)?.name ?? ap.storeCode,
+      name: ap.name,
+      ownerUserId: row.ownerUserId,
+      owner: this.ownerSummary(row.ownerUserId),
+      status: online ? 'online' : 'offline',
+      online,
+      lastOnlineAt: ap.lastSeenAt,
+    };
+  }
+
+  private localAps(request?: Request): LocalAp[] {
+    return this.visibleRows([...this.db.baseStations.values()] as Array<BaseStation & Row>, request).map((ap) => this.localAp(ap, request, false));
   }
 
   private filterAps(aps: LocalAp[], query: Row) {
     const storeCode = stringValue(query.storeCode);
-    return storeCode ? aps.filter((ap) => ap.storeCode === storeCode) : aps;
+    const ownerUserId = stringValue(query.ownerUserId);
+    const keyword = stringValue(query.keyword).toLowerCase();
+    return aps.filter((ap) => {
+      if (storeCode && ap.storeCode !== storeCode) return false;
+      if (ownerUserId && String(ap.ownerUserId ?? '') !== ownerUserId) return false;
+      if (!keyword) return true;
+      const haystack = [ap.id, ap.apCode, ap.name, ap.storeCode, ap.storeName, ap.status]
+        .map((item) => stringValue(item).toLowerCase())
+        .join(' ');
+      return haystack.includes(keyword);
+    });
   }
 
   private resolveDevicePreset(deviceType?: string, template?: Row | null, labelId?: string) {
@@ -2492,14 +3530,17 @@ export class LocalCloudController {
     };
   }
 
-  private localAp(ap: BaseStation): LocalAp;
-  private localAp(ap?: BaseStation): LocalAp | null;
-  private localAp(ap?: BaseStation): LocalAp | null {
+  private localAp(ap: BaseStation, request?: Request, includeDetail?: boolean): LocalAp;
+  private localAp(ap?: BaseStation, request?: Request, includeDetail?: boolean): LocalAp | null;
+  private localAp(ap?: BaseStation, request?: Request, includeDetail = true): LocalAp | null {
     if (!ap) return null;
     const row = ap as BaseStation & Row;
-    const devices = [...this.db.labels.values()]
-      .filter((label) => label.apId === ap.id)
-      .map((label) => this.localDevice(label, false));
+    const deviceLabels = [...this.db.labels.values()]
+      .filter((label) => label.apId === ap.id && this.canAccessRow(label as Label & Row, request)) as Array<Label & Row>;
+    const devices = includeDetail
+      ? deviceLabels.slice(0, 200).map((label) => this.localDeviceListItem(label, request))
+      : [];
+    const boundDeviceCount = deviceLabels.filter((label) => label.productId || label.templateId).length;
     const discoveredLabels = ap.discoveredLabels ?? {};
     const discoveredDevices = Object.values(discoveredLabels).map((item) => ({
       eslCode: item.eslCode,
@@ -2517,6 +3558,68 @@ export class LocalCloudController {
       apCode: ap.id,
       storeCode: ap.storeCode,
       storeName: this.db.stores.get(ap.storeCode)?.name ?? ap.storeCode,
+      ownerUserId: row.ownerUserId,
+      owner: this.ownerSummary(row.ownerUserId),
+      name: ap.name,
+      ip: ap.ip,
+      mac: ap.mac,
+      firmwareVersion: ap.firmware,
+      location: row.location,
+      config: {
+        ...config,
+        autoImportScannedLabels: config.autoImportScannedLabels === true,
+      },
+      status: online ? 'online' : 'offline',
+      online,
+      lastOnlineAt: ap.lastSeenAt,
+      lastHeartbeatAt: latestHeartbeat,
+      heartbeatIntervalSeconds: Number(process.env.AP_OFFLINE_AFTER_SECONDS ?? 90),
+      deviceCount: deviceLabels.length,
+      boundDeviceCount,
+      discoveredDeviceCount: discoveredDevices.length,
+      devices,
+      boundDevices: includeDetail ? devices.filter((item) => item.bindStatus === 'bound') : [],
+      discoveredDevices: includeDetail ? discoveredDevices.slice(0, 200) : [],
+      recentHeartbeats: includeDetail ? [{
+        id: `${ap.id}-latest`,
+        createdAt: latestHeartbeat,
+        status: online ? 'online' : 'offline',
+        payloadJson: { ip: ap.ip, firmware: ap.firmware, hostAddr: ap.hostAddr },
+      }] : [],
+      recentTasks: includeDetail ? [...this.db.cloudTasks.values()]
+        .filter((item) => item.apId === ap.id && this.canAccessRow(item as Row, request))
+        .slice(0, 10)
+        .map((item) => this.localTask(item, false)) : [],
+      recentLogs: includeDetail ? this.recentApLogs(ap) : [],
+      createdAt: ap.lastSeenAt ?? now(),
+      updatedAt: ap.lastSeenAt ?? now(),
+    };
+  }
+
+  private localApForOwner(ap: BaseStation, ownerUserId: string): LocalAp {
+    const row = ap as BaseStation & Row;
+    const devices = [...this.db.labels.values()]
+      .filter((label) => label.apId === ap.id && String((label as Label & Row).ownerUserId ?? '') === ownerUserId)
+      .map((label) => this.localDeviceForOwner(label));
+    const discoveredLabels = ap.discoveredLabels ?? {};
+    const discoveredDevices = Object.values(discoveredLabels).map((item) => ({
+      eslCode: item.eslCode,
+      status: item.status,
+      battery: item.battery,
+      signal: item.signal,
+      lastSeenAt: item.lastSeenAt,
+      source: item.source,
+    }));
+    const latestHeartbeat = ap.lastSeenAt ?? now();
+    const online = ap.status === 'online' && isRecentActivity(ap.lastSeenAt);
+    const config = row.config && typeof row.config === 'object' ? row.config as Row : {};
+    return {
+      id: ap.id,
+      apCode: ap.id,
+      storeCode: ap.storeCode,
+      storeName: this.db.stores.get(ap.storeCode)?.name ?? ap.storeCode,
+      ownerUserId: row.ownerUserId,
+      owner: this.ownerSummary(row.ownerUserId),
       name: ap.name,
       ip: ap.ip,
       mac: ap.mac,
@@ -2543,13 +3646,21 @@ export class LocalCloudController {
         payloadJson: { ip: ap.ip, firmware: ap.firmware, hostAddr: ap.hostAddr },
       }],
       recentTasks: [...this.db.cloudTasks.values()]
-        .filter((item) => item.apId === ap.id)
+        .filter((item) => item.apId === ap.id && String(item.ownerUserId ?? '') === ownerUserId)
         .slice(0, 10)
         .map((item) => this.localTask(item, false)),
       recentLogs: this.recentApLogs(ap),
       createdAt: ap.lastSeenAt ?? now(),
       updatedAt: ap.lastSeenAt ?? now(),
     };
+  }
+
+  private localDeviceForOwner(label: Label): LocalDevice {
+    const device = this.localDevice(label, false);
+    delete device.product;
+    delete device.template;
+    delete device.ap;
+    return device;
   }
 
   private labelFromProduct(product: Row): Label {
@@ -2565,17 +3676,17 @@ export class LocalCloudController {
     };
   }
 
-  private findProduct(productId: string) {
+  private findProduct(productId: string): Row {
     const product = this.localProducts().find((item) => item.id === productId);
     if (!product) throw new NotFoundException('Product not found');
     return product;
   }
 
-  private findTemplate(templateId: string) {
+  private findTemplate(templateId: string): Row {
     this.ensureDefaultTemplate();
     const template = this.db.cloudTemplates.get(templateId);
     if (!template) throw new NotFoundException('Template not found');
-    return this.ensureTemplatePreview(template);
+    return this.localTemplate(template);
   }
 
   private isDefaultTemplateDeleted() {
@@ -2626,29 +3737,38 @@ export class LocalCloudController {
   }
 
   private deleteStoreReferences(storeCode: string) {
+    const removedApIds = new Set<string>();
     for (const [apId, ap] of this.db.baseStations.entries()) {
       if (ap.storeCode === storeCode) {
+        removedApIds.add(apId);
         this.db.baseStations.delete(apId);
       }
     }
-    for (const [labelId, label] of this.db.labels.entries()) {
+    for (const label of this.db.labels.values()) {
       if (label.storeCode === storeCode) {
-        this.db.labels.delete(labelId);
+        label.storeCode = '';
+      }
+      const row = label as Label & Row;
+      if (row.apId && removedApIds.has(String(row.apId))) {
+        delete row.apId;
       }
     }
-    for (const [productId, product] of this.db.cloudProducts.entries()) {
+    for (const product of this.db.cloudProducts.values()) {
       if (String(product.storeCode ?? '') === storeCode) {
-        this.db.cloudProducts.delete(productId);
+        delete product.storeCode;
       }
     }
-    for (const [templateId, template] of this.db.cloudTemplates.entries()) {
+    for (const template of this.db.cloudTemplates.values()) {
       if (String(template.storeCode ?? '') === storeCode) {
-        this.db.cloudTemplates.delete(templateId);
+        delete template.storeCode;
       }
     }
-    for (const [taskId, task] of this.db.cloudTasks.entries()) {
+    for (const task of this.db.cloudTasks.values()) {
       if (String(task.storeCode ?? '') === storeCode) {
-        this.db.cloudTasks.delete(taskId);
+        delete task.storeCode;
+      }
+      if (task.apId && removedApIds.has(String(task.apId))) {
+        delete task.apId;
       }
     }
   }

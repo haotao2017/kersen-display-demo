@@ -10,6 +10,7 @@ import { EslDeviceDetailPage, EslDeviceListPage } from '../pages/esl-devices/Esl
 import { ApDetailPage, ApListPage } from '../pages/aps/ApPages';
 import { TaskListPage } from '../pages/tasks/TaskPages';
 import { SettingsPage } from '../pages/settings/SettingsPage';
+import { UserDetailPage, UserListPage } from '../pages/users/UserPages';
 
 export const router = createBrowserRouter([
   { path: '/login', element: <LoginPage /> },
@@ -35,6 +36,8 @@ export const router = createBrowserRouter([
       { path: 'aps', element: <ApListPage /> },
       { path: 'aps/:id', element: <ApDetailPage /> },
       { path: 'tasks', element: <TaskListPage /> },
+      { path: 'users', element: <UserListPage /> },
+      { path: 'users/:id', element: <UserDetailPage /> },
       { path: 'settings', element: <SettingsPage /> },
     ],
   },

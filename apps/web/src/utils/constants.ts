@@ -17,6 +17,7 @@ export const queryKeys = {
   apSummary: (id: string) => ['ap-summary', id],
   apSnapshot: (id: string) => ['ap-snapshot', id],
   users: ['users'],
+  userDetail: (id: string) => ['user', id],
   userInvites: ['user-invites'],
   auditLogs: ['audit-logs'],
   tasks: ['tasks'],

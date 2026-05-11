@@ -1,4 +1,4 @@
-import { DesktopOutlined, DeploymentUnitOutlined, HomeOutlined, InboxOutlined, SettingOutlined, ShopOutlined, ShoppingOutlined, TagsOutlined } from '@ant-design/icons';
+import { DesktopOutlined, DeploymentUnitOutlined, HomeOutlined, InboxOutlined, SettingOutlined, ShopOutlined, ShoppingOutlined, TagsOutlined, UserOutlined } from '@ant-design/icons';
 import { App, Badge, Button, Layout, Menu, Select, Space, Tag, Typography } from 'antd';
 import { Link, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useEffect } from 'react';
@@ -59,6 +59,7 @@ export const MainLayout = () => {
     { key: '/esl-devices', icon: <DesktopOutlined />, label: <Link to="/esl-devices">{tx('ESL 设备', 'Display Nodes')}</Link> },
     { key: '/aps', icon: <DeploymentUnitOutlined />, label: <Link to="/aps">{tx('AP 基站', 'AP Stations')}</Link> },
     { key: '/tasks', icon: <InboxOutlined />, label: <Link to="/tasks">{tx('任务中心', 'Tasks')}</Link> },
+    ...(user?.role === 'ADMIN' ? [{ key: '/users', icon: <UserOutlined />, label: <Link to="/users">{tx('用户', 'Users')}</Link> }] : []),
     { key: '/settings', icon: <SettingOutlined />, label: <Link to="/settings">{tx('系统设置', 'Settings')}</Link> },
   ];
 

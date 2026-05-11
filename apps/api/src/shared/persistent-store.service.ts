@@ -23,6 +23,10 @@ export class PersistentStoreService implements OnModuleDestroy {
     const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
     this.prisma = new PrismaClient({
       adapter,
+      transactionOptions: {
+        maxWait: Math.max(5000, Number(process.env.PRISMA_TRANSACTION_MAX_WAIT_MS ?? 15000)),
+        timeout: Math.max(5000, Number(process.env.PRISMA_TRANSACTION_TIMEOUT_MS ?? 60000)),
+      },
       log: process.env.PRISMA_QUERY_LOG === 'true' ? ['warn', 'error', 'query'] : ['warn', 'error'],
     });
   }
@@ -195,11 +199,15 @@ export class PersistentStoreService implements OnModuleDestroy {
     try {
       await this.prisma.$transaction(async (tx) => {
         const storeCodes = snapshot.stores.map((item) => item.code);
+        const storeCodeSet = new Set(storeCodes);
+        const fallbackStoreCode = storeCodes[0] ?? process.env.UPSTREAM_STORE_CODE ?? '20248517';
         const apIds = snapshot.baseStations.map((item) => item.id);
         const apIdSet = new Set(apIds);
         const labelIds = snapshot.labels.map((item) => item.id);
         const productIds = snapshot.cloudProducts.map((item) => stringValue(item.id)).filter(Boolean);
+        const productIdSet = new Set(productIds);
         const templateIds = snapshot.cloudTemplates.map((item) => stringValue(item.id)).filter(Boolean);
+        const templateIdSet = new Set(templateIds);
         const taskIds = snapshot.cloudTasks.map((item) => stringValue(item.id)).filter(Boolean);
 
         for (const store of snapshot.stores) {
@@ -233,10 +241,11 @@ export class PersistentStoreService implements OnModuleDestroy {
         }
 
         for (const ap of snapshot.baseStations) {
+          const safeStoreCode = safeStoreCodeOf(ap.storeCode, storeCodeSet, fallbackStoreCode);
           await tx.baseStation.upsert({
             where: { id: ap.id },
             update: {
-              storeCode: ap.storeCode,
+              storeCode: safeStoreCode,
               name: ap.name,
               mac: ap.mac,
               ip: ap.ip,
@@ -253,7 +262,7 @@ export class PersistentStoreService implements OnModuleDestroy {
             },
             create: {
               id: ap.id,
-              storeCode: ap.storeCode,
+              storeCode: safeStoreCode,
               name: ap.name,
               mac: ap.mac,
               ip: ap.ip,
@@ -282,8 +291,8 @@ export class PersistentStoreService implements OnModuleDestroy {
         for (const product of snapshot.cloudProducts) {
           await tx.product.upsert({
             where: { id: stringValue(product.id) },
-            update: productInput(product),
-            create: productInput(product),
+            update: productInput(product, templateIdSet),
+            create: productInput(product, templateIdSet),
           });
         }
 
@@ -291,16 +300,16 @@ export class PersistentStoreService implements OnModuleDestroy {
           const row = label as Label & JsonRow;
           await tx.label.upsert({
             where: { id: label.id },
-            update: labelInput(row, apIdSet),
-            create: labelInput(row, apIdSet),
+            update: labelInput(row, apIdSet, storeCodeSet, fallbackStoreCode, productIdSet, templateIdSet),
+            create: labelInput(row, apIdSet, storeCodeSet, fallbackStoreCode, productIdSet, templateIdSet),
           });
         }
 
         for (const task of snapshot.cloudTasks) {
           await tx.refreshTask.upsert({
             where: { id: stringValue(task.id) },
-            update: refreshTaskInput(task, apIdSet),
-            create: refreshTaskInput(task, apIdSet),
+            update: refreshTaskInput(task, apIdSet, storeCodeSet, fallbackStoreCode, productIdSet, templateIdSet),
+            create: refreshTaskInput(task, apIdSet, storeCodeSet, fallbackStoreCode, productIdSet, templateIdSet),
           });
         }
 
@@ -348,7 +357,12 @@ function storeCodeOf(row: JsonRow) {
   return stringValue(row.storeCode, process.env.UPSTREAM_STORE_CODE ?? '20248517');
 }
 
-function productInput(row: JsonRow) {
+function safeStoreCodeOf(value: unknown, validStoreCodes: Set<string>, fallbackStoreCode: string) {
+  const storeCode = stringValue(value);
+  return storeCode && validStoreCodes.has(storeCode) ? storeCode : fallbackStoreCode;
+}
+
+function productInput(row: JsonRow, validTemplateIds?: Set<string>) {
   const timestamp = toDate(row.updatedAt ?? row.createdAt);
   return {
     id: stringValue(row.id),
@@ -363,7 +377,7 @@ function productInput(row: JsonRow) {
     promotionText: row.promotionText == null ? null : String(row.promotionText),
     imageUrl: row.imageUrl == null ? null : String(row.imageUrl),
     customFields: toJson(row.customFields ?? {}),
-    defaultTemplateId: row.defaultTemplateId == null || row.defaultTemplateId === '' ? null : String(row.defaultTemplateId),
+    defaultTemplateId: relationId(row.defaultTemplateId, validTemplateIds),
     status: stringValue(row.status, 'active'),
     createdAt: toDate(row.createdAt ?? timestamp),
     updatedAt: timestamp,
@@ -400,11 +414,18 @@ function relationId(value: unknown, validIds?: Set<string>) {
   return validIds && !validIds.has(id) ? null : id;
 }
 
-function labelInput(row: Label & JsonRow, validApIds?: Set<string>) {
+function labelInput(
+  row: Label & JsonRow,
+  validApIds?: Set<string>,
+  validStoreCodes?: Set<string>,
+  fallbackStoreCode?: string,
+  validProductIds?: Set<string>,
+  validTemplateIds?: Set<string>,
+) {
   const timestamp = toDate(row.updatedAt ?? row.createdAt);
   return {
     id: row.id,
-    storeCode: row.storeCode,
+    storeCode: validStoreCodes && fallbackStoreCode ? safeStoreCodeOf(row.storeCode, validStoreCodes, fallbackStoreCode) : row.storeCode,
     apId: relationId(row.apId, validApIds),
     sku: row.sku ?? null,
     title: row.title,
@@ -414,8 +435,8 @@ function labelInput(row: Label & JsonRow, validApIds?: Set<string>) {
     battery: row.battery ?? null,
     rssi: row.rssi ?? null,
     services: toJson(row.services),
-    productId: row.productId == null || row.productId === '' ? null : String(row.productId),
-    templateId: row.templateId == null || row.templateId === '' ? null : String(row.templateId),
+    productId: relationId(row.productId, validProductIds),
+    templateId: relationId(row.templateId, validTemplateIds),
     deviceType: row.deviceType == null ? null : String(row.deviceType),
     screenWidth: row.screenWidth == null ? null : numberValue(row.screenWidth),
     screenHeight: row.screenHeight == null ? null : numberValue(row.screenHeight),
@@ -424,16 +445,23 @@ function labelInput(row: Label & JsonRow, validApIds?: Set<string>) {
   };
 }
 
-function refreshTaskInput(row: JsonRow, validApIds?: Set<string>) {
+function refreshTaskInput(
+  row: JsonRow,
+  validApIds?: Set<string>,
+  validStoreCodes?: Set<string>,
+  fallbackStoreCode?: string,
+  validProductIds?: Set<string>,
+  validTemplateIds?: Set<string>,
+) {
   const timestamp = toDate(row.updatedAt ?? row.createdAt);
   return {
     id: stringValue(row.id),
-    storeCode: storeCodeOf(row),
+    storeCode: validStoreCodes && fallbackStoreCode ? safeStoreCodeOf(row.storeCode, validStoreCodes, fallbackStoreCode) : storeCodeOf(row),
     taskType: stringValue(row.taskType, 'refresh'),
     eslDeviceId: stringValue(row.eslDeviceId),
     apId: relationId(row.apId, validApIds),
-    productId: row.productId == null || row.productId === '' ? null : String(row.productId),
-    templateId: row.templateId == null || row.templateId === '' ? null : String(row.templateId),
+    productId: relationId(row.productId, validProductIds),
+    templateId: relationId(row.templateId, validTemplateIds),
     payload: toJson(row.payload ?? {}),
     renderResult: toJson(row.renderResult ?? {}),
     delivery: toJson(row.delivery),

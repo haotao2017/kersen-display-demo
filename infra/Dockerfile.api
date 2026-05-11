@@ -20,7 +20,7 @@ COPY --from=build /app/apps/api/prisma ./apps/api/prisma
 COPY --from=build /app/prisma.config.ts ./prisma.config.ts
 COPY infra/start-api.sh ./infra/start-api.sh
 COPY apps/api/package.json ./apps/api/package.json
-RUN chmod +x ./infra/start-api.sh && mkdir -p /app/uploads /app/apps/api/data
-VOLUME ["/app/uploads", "/app/apps/api/data"]
+RUN chmod +x ./infra/start-api.sh && mkdir -p /app/uploads /app/data
+VOLUME ["/app/uploads", "/app/data"]
 EXPOSE 4000 1883
 CMD ["./infra/start-api.sh"]

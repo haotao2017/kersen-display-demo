@@ -1566,6 +1566,9 @@ export class ApWebsocketService {
     const writeMs = toNumber(payload?.write_time_ms, payload?.writeTimeMs, payload?.write_ms, payload?.write, res?.write_time_ms, res?.writeTimeMs, res?.write_ms, res?.write, cmd?.write_time_ms, cmd?.writeTimeMs, cmd?.write_ms, cmd?.write);
     const rwTaskRest = toNumber(payload?.rw_task_rest, payload?.rwTaskRest);
     const tasksCount = toNumber(payload?.tasks_count, payload?.tasksCount);
+    const taskPayload = task.payload && typeof task.payload === 'object' ? task.payload as Record<string, unknown> : {};
+    const currentStatus = String(task.status ?? '');
+    const currentResultMsg = String(task.resultMsg ?? '');
     const technical = {
       traceStatus: trace.status,
       replyType: replyType || undefined,
@@ -1621,6 +1624,21 @@ export class ApWebsocketService {
     } else if (trace.status === 'ap_reply_seen') {
       nextStatus = 'sending';
       resultMsg = '已收到基站响应，正在等待价签确认。';
+    }
+
+    if (currentStatus === 'success') {
+      nextStatus = 'success';
+      resultMsg = currentResultMsg || '刷新成功，基站已完成本次下发。';
+    } else if (taskPayload.autoRetryExhausted === true && nextStatus !== 'success') {
+      nextStatus = 'failed';
+      resultMsg = '刷新失败：已多次自动唤醒并重试，仍未收到价签确认。';
+      task.payload = { ...taskPayload, retryInFlight: false };
+    } else if (
+      nextStatus === 'sending'
+      && taskPayload.retryInFlight === true
+      && (currentResultMsg.includes('重新唤醒') || currentResultMsg.includes('自动唤醒') || currentResultMsg.includes('补发'))
+    ) {
+      resultMsg = currentResultMsg;
     }
 
     task.status = nextStatus;
@@ -1785,13 +1803,13 @@ export class ApWebsocketService {
 
     const errno = parsed.res && typeof parsed.res === 'object'
       ? (parsed.res as Record<string, unknown>).errno
-      : undefined;
+      : parsed.errno;
 
     // READ_WRITE_SVC 的 CONN_DEV / DIS_CONN 通常是连接生命周期；
     // 当前基站在写屏完成后会返回 DIS_CONN + errno=0 + tasks_count=0，需绑定到 trace 作为最终确认。
     if (type === 'READ_WRITE_SVC' && cmdType && cmdType !== 'WRITE_SVC') {
       const tasksCount = Number(parsed.tasks_count ?? parsed.tasksCount);
-      const isFinalDisconn = cmdType === 'DIS_CONN' && errno === 0 && tasksCount === 0;
+      const isFinalDisconn = cmdType === 'DIS_CONN' && (errno === 0 || errno === undefined) && tasksCount === 0;
       if ((cmdType === 'CONN_DEV' || cmdType === 'DIS_CONN') && typeof errno === 'number') {
         for (const trace of recent) {
           const existingReply = trace.reply && typeof trace.reply === 'object' ? trace.reply as Record<string, unknown> : undefined;
@@ -1802,6 +1820,17 @@ export class ApWebsocketService {
             ? existingPayload.cmd as Record<string, unknown>
             : undefined;
           const existingCmdType = typeof existingCmd?.type === 'string' ? existingCmd.type : undefined;
+          const existingRes = existingPayload?.res && typeof existingPayload.res === 'object'
+            ? existingPayload.res as Record<string, unknown>
+            : undefined;
+          const existingErrno = existingPayload?.errno ?? existingRes?.errno;
+          const existingTasksCount = Number(existingPayload?.tasks_count ?? existingPayload?.tasksCount);
+          const existingIsFinalDisconn = existingCmdType === 'DIS_CONN'
+            && (existingErrno === 0 || existingErrno === undefined)
+            && existingTasksCount === 0;
+          if (!isFinalDisconn && existingIsFinalDisconn) {
+            continue;
+          }
           if (!isFinalDisconn && existingPayload?.type === 'READ_WRITE_SVC' && existingCmdType === 'WRITE_SVC') {
             continue;
           }

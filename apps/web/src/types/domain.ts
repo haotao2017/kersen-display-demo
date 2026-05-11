@@ -55,6 +55,8 @@ export interface Store {
   code: string;
   name: string;
   address?: string;
+  ownerUserId?: string | null;
+  owner?: Pick<User, 'id' | 'username' | 'displayName' | 'role'> | null;
   serverUrl?: string;
   mqttTcpPort?: number;
   mqttWsPath?: string;
@@ -83,6 +85,10 @@ export interface Product {
   imageUrl?: string;
   customFields?: Record<string, string>;
   defaultTemplateId?: string;
+  defaultTemplate?: Template | null;
+  bindDeviceCount?: number;
+  ownerUserId?: string | null;
+  owner?: Pick<User, 'id' | 'username' | 'displayName' | 'role'> | null;
   status: 'active' | 'inactive';
   createdAt: string;
   updatedAt: string;
@@ -139,6 +145,9 @@ export interface Template {
   status: 'draft' | 'published';
   version: number;
   previewImageUrl?: string;
+  useDeviceCount?: number;
+  ownerUserId?: string | null;
+  owner?: Pick<User, 'id' | 'username' | 'displayName' | 'role'> | null;
   schema: TemplateSchema;
   recentVersions?: Array<{
     id: string;
@@ -172,6 +181,7 @@ export interface Ap {
   heartbeatIntervalSeconds?: number;
   online?: boolean;
   deviceCount?: number;
+  boundDeviceCount?: number;
   discoveredDeviceCount?: number;
   devices?: EslDevice[];
   boundDevices?: EslDevice[];
@@ -227,6 +237,8 @@ export interface EslDevice {
   eslCode: string;
   storeCode?: string;
   name?: string;
+  ownerUserId?: string | null;
+  owner?: Pick<User, 'id' | 'username' | 'displayName' | 'role'> | null;
   apId?: string;
   productId?: string;
   templateId?: string;
@@ -285,6 +297,24 @@ export interface PushTask {
     message?: string;
     trace?: Record<string, unknown>;
   }>;
+}
+
+export interface UserDetail {
+  user: User;
+  counts: {
+    stores: number;
+    aps: number;
+    devices: number;
+    products: number;
+    templates: number;
+    tasks: number;
+  };
+  stores: Store[];
+  aps: Ap[];
+  devices: EslDevice[];
+  products: Product[];
+  templates: Template[];
+  tasks: PushTask[];
 }
 
 export interface Paginated<T> {

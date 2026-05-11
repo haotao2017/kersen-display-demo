@@ -16,6 +16,15 @@ export const buildTaskStatusLabels = (tx: Tx): Record<string, string> => ({
   superseded: tx('已合并', 'Merged'),
 });
 
+export const getTaskStatusLabel = (task: any, tx: Tx) => {
+  const status = normalizeTaskStatus(task?.status);
+  const raw = String(task?.resultMsg ?? task?.message ?? '');
+  if ((status === 'sending' || status === 'sent') && (raw.includes('自动唤醒') || raw.includes('重新唤醒') || raw.includes('重新下发'))) {
+    return tx('重试中', 'Retrying');
+  }
+  return buildTaskStatusLabels(tx)[status] ?? String(task?.status ?? '-');
+};
+
 export const buildTaskTypeLabels = (tx: Tx): Record<string, string> => ({
   bind: tx('绑定设备', 'Bind Device'),
   bind_refresh: tx('绑定后刷新', 'Refresh after bind'),
@@ -52,6 +61,9 @@ export const getTaskUserText = (task: any, tx: Tx) => {
   if (status === 'queued') return tx('任务已提交，正在排队。', 'Task submitted and waiting in queue.');
   if (status === 'rendering') return tx('正在生成价签画面。', 'Generating the label image.');
   if (status === 'sending' || status === 'sent' || status === 'ap_reply_seen' || status === 'socket_write_ok') {
+    if (raw.includes('自动唤醒') || raw.includes('重新唤醒') || raw.includes('重新下发')) {
+      return tx('后台正在唤醒价签并重试刷新。', 'Waking the display node and retrying in the background.');
+    }
     return taskType === 'auto_retry_after_wake'
       ? tx('正在补发刷新，请稍等。', 'Retry refresh is being sent.')
       : tx('已发送到基站，正在等待结果。', 'Sent to the station and waiting for the result.');
@@ -62,6 +74,7 @@ export const getTaskUserText = (task: any, tx: Tx) => {
     if (raw.includes('WebSocket') || raw.includes('MQTT') || status.startsWith('socket_')) return tx('基站连接不可用，刷新未发送。', 'Station connection unavailable. Refresh was not sent.');
     if (raw.includes('标签不存在')) return tx('标签不存在，任务无法继续。', 'Display node not found. Task cannot continue.');
     if (raw.includes('设备执行失败')) return tx('价签返回失败，请重试。', 'The display node reported a failure. Please retry.');
+    if (raw.includes('已自动唤醒并重试')) return tx('多次自动重试后仍未成功。', 'Still failed after automatic retries.');
     return tx('任务失败，请重试。', 'Task failed. Please retry.');
   }
   return tx('任务状态已更新。', 'Task status updated.');
@@ -72,7 +85,13 @@ export const getTaskSummary = (detail: any, tx: Tx) => {
   if (!detail) return tx('正在加载任务详情...', 'Loading task details...');
   if (status === 'queued') return tx('任务已经提交，正在排队处理中。', 'The task has been submitted and is waiting in queue.');
   if (status === 'rendering') return tx('系统正在生成要显示的内容。', 'The system is generating content for display.');
-  if (status === 'sending' || status === 'sent') return tx('内容已经发出，正在等待基站返回结果。', 'The content has been sent and is waiting for the station result.');
+  if (status === 'sending' || status === 'sent') {
+    const raw = String(detail?.resultMsg ?? '');
+    if (raw.includes('自动唤醒') || raw.includes('重新唤醒') || raw.includes('重新下发')) {
+      return tx('系统正在后台唤醒价签并重新发送刷新内容。', 'The system is waking the display node and resending the refresh in the background.');
+    }
+    return tx('内容已经发出，正在等待基站返回结果。', 'The content has been sent and is waiting for the station result.');
+  }
   if (status === 'success') return tx('任务已经完成。', 'The task has completed.');
   if (status === 'failed') return tx('任务执行失败，请查看原因后重试。', 'The task failed. Please review the reason and try again.');
   if (status === 'timeout') return tx('等待时间较长，暂时没有收到最终结果。', 'No final result has been received yet.');

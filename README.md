@@ -38,7 +38,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-控制台访问 `http://localhost:8080`，API 访问 `http://localhost:4000`。API 容器启动时默认会执行 `prisma db push`，可通过 `PRISMA_DB_PUSH_ON_START=false` 关闭。
+控制台访问 `http://localhost:8080`，API 访问 `http://localhost:4000`。生产环境默认不会在容器启动时执行 `prisma db push`；确需同步数据库结构时，可临时设置 `PRISMA_DB_PUSH_ON_START=true`。
 
 `DATABASE_URL` 配好后，门店、基站、标签、商品、模板、刷新任务会同步到 Postgres；不配置时仍使用本地 `apps/api/data/store.json`。`REDIS_URL` 配好后刷新任务进入 Redis/BullMQ 队列；不配置时使用进程内队列。
 

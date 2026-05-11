@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { UploadProps } from 'antd';
 import { api } from '../../api';
+import { useAppStore } from '../../app/store';
 import { PageHeaderCard } from '../../components/common/PageHeaderCard';
 import { useDesignerStore } from '../../designer/useDesignerStore';
 import { useI18n } from '../../i18n';
@@ -891,7 +892,12 @@ export const TemplateListPage = () => {
   const { message, modal } = App.useApp();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { data, isPending } = useQuery({ queryKey: queryKeys.templates, queryFn: () => api.templates({}) });
+  const currentUser = useAppStore((state) => state.user);
+  const isAdmin = currentUser?.role === 'ADMIN';
+  const [filters, setFilters] = useState<{ ownerUserId?: string; keyword?: string }>({});
+  const { data, isPending } = useQuery({ queryKey: [...queryKeys.templates, filters], queryFn: () => api.templates(filters) });
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
+  const userOptions = useMemo(() => (users ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
   const publish = useMutation({
     mutationFn: (id: string) => api.publishTemplate(id, true),
     onSuccess: () => {
@@ -910,15 +916,38 @@ export const TemplateListPage = () => {
       message.success(tx('模板已删除', 'Template deleted'));
     },
   });
+  const describeTemplateImpact = (row: any) => tx(
+    `删除后只删除这个模板，并解除 ${row.useDeviceCount ?? 0} 个显示节点/商品默认模板与它的关联；不会删除显示节点、商品或任务记录。`,
+    `This deletes only this template and clears links from ${row.useDeviceCount ?? 0} display node(s)/data source defaults. Display nodes, data sources, and task records are kept.`,
+  );
   return (
     <Space direction="vertical" style={{ width: '100%' }} size={16}>
       <PageHeaderCard title={tx('模板管理', 'Templates')} extra={<Button type="primary" onClick={() => navigate('/templates/create')}>{tx('新增模板', 'New Template')}</Button>} />
       <Card>
+        <Space wrap style={{ marginBottom: 16 }}>
+          {isAdmin ? (
+            <Select
+              allowClear
+              placeholder={tx('按用户筛选', 'Filter by user')}
+              style={{ width: 240 }}
+              options={userOptions}
+              value={filters.ownerUserId}
+              onChange={(ownerUserId) => setFilters((current) => ({ ...current, ownerUserId }))}
+            />
+          ) : null}
+          <Input.Search
+            allowClear
+            placeholder={tx('搜索名称/编码/设备型号', 'Search name/code/device model')}
+            style={{ width: 280 }}
+            onSearch={(keyword) => setFilters((current) => ({ ...current, keyword: keyword.trim() || undefined }))}
+          />
+        </Space>
         <Table
           rowKey="id"
           loading={isPending}
           dataSource={data?.items ?? []}
           columns={[
+            ...(isAdmin ? [{ title: tx('归属账号', 'Owner'), render: (_: unknown, row: any) => row.owner?.displayName || row.owner?.username || row.ownerUserId || '-' }] : []),
             {
               title: tx('缩略图', 'Preview'),
               width: 140,
@@ -935,7 +964,6 @@ export const TemplateListPage = () => {
             { title: tx('编码', 'Code'), dataIndex: 'code' },
             { title: tx('版本', 'Version'), dataIndex: 'version' },
             { title: tx('状态', 'Status'), dataIndex: 'status' },
-            { title: tx('使用商品数', 'Products Using It'), dataIndex: 'useProductCount' },
             { title: tx('使用设备数', 'Devices Using It'), dataIndex: 'useDeviceCount' },
             {
               title: tx('操作', 'Actions'),
@@ -948,8 +976,11 @@ export const TemplateListPage = () => {
                     onClick={() => {
                       modal.confirm({
                         title: tx('删除模板？', 'Delete template?'),
-                        content: tx('删除后将清空关联的数据源默认模板、显示节点模板和模板历史版本。', 'Deleting this template clears linked data source defaults, display node template bindings, and template history.'),
+                        content: describeTemplateImpact(row),
                         okButtonProps: { danger: true, loading: remove.isPending && remove.variables === row.id },
+                        okText: tx('删除', 'Delete'),
+                        cancelText: tx('取消', 'Cancel'),
+                        width: 620,
                         onOk: async () => remove.mutateAsync(row.id),
                       });
                     }}
@@ -970,9 +1001,12 @@ export const TemplateFormPage = () => {
   const { tx } = useI18n();
   const { id } = useParams();
   const navigate = useNavigate();
+  const currentUser = useAppStore((state) => state.user);
+  const isAdmin = currentUser?.role === 'ADMIN';
   const [form] = Form.useForm();
   const isEdit = Boolean(id);
   const { data, isPending } = useQuery({ queryKey: id ? queryKeys.template(id) : ['template-create'], queryFn: () => api.template(id!), enabled: isEdit });
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin && !isEdit });
   const mutation = useMutation({
     mutationFn: (values: any) => (isEdit ? api.updateTemplate(id!, values) : api.createTemplate(values)),
     onSuccess: (result: any) => navigate(`/templates/${result.id}/designer`),
@@ -993,6 +1027,8 @@ export const TemplateFormPage = () => {
       deviceType: data?.deviceType ?? preset.id.toUpperCase(),
     });
   }, [currentPresetId, data, form]);
+
+  const userOptions = (users ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id }));
 
   return (
     <Card loading={isEdit && isPending}>
@@ -1032,6 +1068,11 @@ export const TemplateFormPage = () => {
             }}
           />
         </Form.Item>
+        {isAdmin && !isEdit ? (
+          <Form.Item name="ownerUserId" label={tx('归属账号', 'Owner')}>
+            <Select allowClear options={userOptions} placeholder={tx('默认当前账号', 'Default to current user')} />
+          </Form.Item>
+        ) : null}
         <Form.Item name="deviceType" label={tx('设备型号', 'Device Model')}>
           <Input disabled />
         </Form.Item>
