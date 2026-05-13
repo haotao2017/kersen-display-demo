@@ -401,6 +401,7 @@ export class ApWebsocketService {
         this.activeSockets.set(apId, ws);
         const current = this.db.baseStations.get(apId);
         this.db.baseStations.set(apId, {
+          ...current,
           id: apId,
           storeCode: storeCode ?? current?.storeCode ?? 'unknown',
           name: current?.name ?? `AP ${apId}`,
@@ -2162,13 +2163,11 @@ export class ApWebsocketService {
     const apId = ap?.id;
     const storeCode = ap?.storeCode ?? process.env.UPSTREAM_STORE_CODE ?? '20248517';
     const seenLabelIds = new Set(entries.map(([labelId]) => labelId));
-    if (this.isWarmupScanIgnored(apId)) {
-      return;
-    }
+    const warmupScanIgnored = this.isWarmupScanIgnored(apId);
     const shouldAutoImport = apAutoImportEnabled(ap);
     const discoveredLabels = { ...(ap?.discoveredLabels ?? {}) };
 
-    if (apId && shouldAutoImport) {
+    if (apId && shouldAutoImport && !warmupScanIgnored) {
       for (const label of this.db.labels.values()) {
         if (label.apId === apId && !seenLabelIds.has(label.id)) {
           this.db.labels.set(label.id, {
@@ -2238,9 +2237,6 @@ export class ApWebsocketService {
 
     const ap = (context?.apId ? this.db.baseStations.get(context.apId) : undefined)
       ?? [...this.db.baseStations.values()].find((item) => item.status === 'online');
-    if (this.isWarmupScanIgnored(ap?.id)) {
-      return;
-    }
     const current = this.db.labels.get(labelId);
     const currentRow = (current ?? {}) as Label & Record<string, unknown>;
     const services = Object.fromEntries((message.service_list ?? []).map((item) => [item.service ?? 'unknown', item.b64dat ?? '']));

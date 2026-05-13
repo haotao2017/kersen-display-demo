@@ -41,6 +41,16 @@ const formatTemplateScreenSize = (value?: { deviceType?: unknown; width?: unknow
 const SCREEN_PRESET_OPTIONS = Array.from(
   new Map(ESL_SCREEN_PRESETS.map((item) => [`${item.width}x${item.height}`, item])).values(),
 ).map((item) => ({ label: formatScreenSize(item), value: item.id }));
+const DEFAULT_COLOR_MODE: TemplateSchema['meta']['colorMode'] = 'bwr';
+const COLOR_MODE_OPTIONS = [
+  { label: '2色（黑白）', value: 'bw' },
+  { label: '3色（黑白红）', value: 'bwr' },
+  { label: '4色（黑白红黄）', value: 'bwry' },
+] as const;
+
+const normalizeColorMode = (value: unknown): TemplateSchema['meta']['colorMode'] => (
+  value === 'bw' || value === 'bwr' || value === 'bwry' ? value : DEFAULT_COLOR_MODE
+);
 
 const findScreenPreset = (value?: { deviceType?: unknown; width?: unknown; height?: unknown } | null) => {
   const deviceType = String(value?.deviceType ?? '').toLowerCase();
@@ -302,7 +312,11 @@ const sanitizeDesignerSchema = (schema: any) => {
   };
 };
 
-const resizeDesignerSchema = (schema: TemplateSchema, preset: typeof ESL_SCREEN_PRESETS[number]): TemplateSchema => {
+const resizeDesignerSchema = (
+  schema: TemplateSchema,
+  preset: typeof ESL_SCREEN_PRESETS[number],
+  colorMode = normalizeColorMode(schema.meta.colorMode),
+): TemplateSchema => {
   const oldWidth = Number(schema.meta.width || preset.width) || preset.width;
   const oldHeight = Number(schema.meta.height || preset.height) || preset.height;
   const scaleX = preset.width / oldWidth;
@@ -314,7 +328,7 @@ const resizeDesignerSchema = (schema: TemplateSchema, preset: typeof ESL_SCREEN_
         deviceType: preset.id.toUpperCase(),
         width: preset.width,
         height: preset.height,
-        colorMode: 'bwry' as const,
+        colorMode,
     },
     elements: schema.elements.map((element) => {
       const isBackground = isBackgroundImageElement(element, { width: oldWidth, height: oldHeight });
@@ -339,7 +353,11 @@ const resizeDesignerSchema = (schema: TemplateSchema, preset: typeof ESL_SCREEN_
   };
 };
 
-const applyScreenPresetToSchema = (schema: TemplateSchema | null, preset: typeof ESL_SCREEN_PRESETS[number]) => {
+const applyScreenPresetToSchema = (
+  schema: TemplateSchema | null,
+  preset: typeof ESL_SCREEN_PRESETS[number],
+  colorMode = normalizeColorMode(schema?.meta.colorMode),
+) => {
   if (!schema) return schema;
   if (schema.meta.width === preset.width && schema.meta.height === preset.height) {
     return {
@@ -347,11 +365,11 @@ const applyScreenPresetToSchema = (schema: TemplateSchema | null, preset: typeof
       meta: {
         ...schema.meta,
         deviceType: preset.id.toUpperCase(),
-        colorMode: 'bwry' as const,
+        colorMode,
       },
     };
   }
-  return resizeDesignerSchema(schema, preset);
+  return resizeDesignerSchema(schema, preset, colorMode);
 };
 
 const createDesignerElement = (
@@ -1023,7 +1041,7 @@ export const TemplateFormPage = () => {
       screenPreset: preset.id,
       width: data?.width ?? preset.width,
       height: data?.height ?? preset.height,
-      colorMode: 'bwry',
+      colorMode: normalizeColorMode(data?.colorMode),
       deviceType: data?.deviceType ?? preset.id.toUpperCase(),
     });
   }, [currentPresetId, data, form]);
@@ -1035,7 +1053,7 @@ export const TemplateFormPage = () => {
       <Form
         form={form}
         layout="vertical"
-        initialValues={{ screenPreset: DEFAULT_SCREEN_PRESET.id, deviceType: DEFAULT_SCREEN_PRESET.id.toUpperCase(), width: DEFAULT_SCREEN_PRESET.width, height: DEFAULT_SCREEN_PRESET.height, colorMode: 'bwry', status: 'draft' }}
+        initialValues={{ screenPreset: DEFAULT_SCREEN_PRESET.id, deviceType: DEFAULT_SCREEN_PRESET.id.toUpperCase(), width: DEFAULT_SCREEN_PRESET.width, height: DEFAULT_SCREEN_PRESET.height, colorMode: DEFAULT_COLOR_MODE, status: 'draft' }}
         onFinish={(values) => {
           const preset = ESL_SCREEN_PRESETS.find((item) => item.id === values.screenPreset) ?? DEFAULT_SCREEN_PRESET;
           mutation.mutate({
@@ -1043,7 +1061,7 @@ export const TemplateFormPage = () => {
             deviceType: preset.id.toUpperCase(),
             width: preset.width,
             height: preset.height,
-            colorMode: 'bwry',
+            colorMode: normalizeColorMode(values.colorMode),
           });
         }}
       >
@@ -1063,7 +1081,6 @@ export const TemplateFormPage = () => {
                 deviceType: preset.id.toUpperCase(),
                 width: preset.width,
                 height: preset.height,
-                colorMode: 'bwry',
               });
             }}
           />
@@ -1083,7 +1100,7 @@ export const TemplateFormPage = () => {
           <InputNumber min={1} style={{ width: '100%' }} disabled />
         </Form.Item>
         <Form.Item name="colorMode" label={tx('色彩模式', 'Color Mode')}>
-          <Select disabled options={[{ label: tx('四色', '4 Colors'), value: 'bwry' }]} />
+          <Select options={COLOR_MODE_OPTIONS.map((item) => ({ ...item, label: tx(item.label, item.label) }))} />
         </Form.Item>
         <Button htmlType="submit" type="primary">{tx('保存模板', 'Save Template')}</Button>
       </Form>
@@ -1177,6 +1194,7 @@ export const TemplateDesignerPage = () => {
   const saveTemplateMeta = async () => {
     const values = await templateForm.validateFields();
     const preset = ESL_SCREEN_PRESETS.find((item) => item.id === values.screenPreset) ?? DEFAULT_SCREEN_PRESET;
+    const colorMode = normalizeColorMode(values.colorMode);
     await api.updateTemplate(id, {
       name: values.name,
       code: values.code,
@@ -1184,14 +1202,14 @@ export const TemplateDesignerPage = () => {
       deviceType: preset.id.toUpperCase(),
       width: preset.width,
       height: preset.height,
-      colorMode: 'bwry',
+      colorMode,
     });
-    return preset;
+    return { preset, colorMode };
   };
   const save = useMutation({
     mutationFn: async () => {
-      const preset = await saveTemplateMeta();
-      const nextSchema = sanitizeDesignerSchema(applyScreenPresetToSchema(schema!, preset));
+      const { preset, colorMode } = await saveTemplateMeta();
+      const nextSchema = sanitizeDesignerSchema(applyScreenPresetToSchema(schema!, preset, colorMode));
       return api.saveTemplateSchema(id, nextSchema);
     },
     onSuccess: () => {
@@ -1203,8 +1221,8 @@ export const TemplateDesignerPage = () => {
   });
   const publishTemplate = useMutation({
     mutationFn: async () => {
-      const preset = await saveTemplateMeta();
-      await api.saveTemplateSchema(id, sanitizeDesignerSchema(applyScreenPresetToSchema(schema!, preset)));
+      const { preset, colorMode } = await saveTemplateMeta();
+      await api.saveTemplateSchema(id, sanitizeDesignerSchema(applyScreenPresetToSchema(schema!, preset, colorMode)));
       return api.publishTemplate(id, true);
     },
     onSuccess: (result) => {
@@ -1389,7 +1407,7 @@ export const TemplateDesignerPage = () => {
       deviceType: preset.id.toUpperCase(),
       width: preset.width,
       height: preset.height,
-      colorMode: 'bwry',
+      colorMode: normalizeColorMode(templateDetail.colorMode),
     });
   }, [templateDetail, templateForm]);
 
@@ -2082,7 +2100,8 @@ export const TemplateDesignerPage = () => {
                       onChange={(value) => {
                         const preset = ESL_SCREEN_PRESETS.find((item) => item.id === value);
                         if (!preset) return;
-                        const nextSchema = applyScreenPresetToSchema(schema, preset);
+                        const colorMode = normalizeColorMode(templateForm.getFieldValue('colorMode'));
+                        const nextSchema = applyScreenPresetToSchema(schema, preset, colorMode);
                         if (nextSchema) {
                           setSchema(nextSchema);
                         }
@@ -2090,7 +2109,6 @@ export const TemplateDesignerPage = () => {
                           deviceType: preset.id.toUpperCase(),
                           width: preset.width,
                           height: preset.height,
-                          colorMode: 'bwry',
                         });
                       }}
                     />
@@ -2114,7 +2132,21 @@ export const TemplateDesignerPage = () => {
                     </Col>
                   </Row>
                   <Form.Item name="colorMode" label={tx('色彩模式', 'Color Mode')}>
-                    <Select disabled options={[{ label: tx('四色', '4 Colors'), value: 'bwry' }]} />
+                    <Select
+                      options={COLOR_MODE_OPTIONS.map((item) => ({ ...item, label: tx(item.label, item.label) }))}
+                      onChange={(value) => {
+                        const colorMode = normalizeColorMode(value);
+                        if (schema) {
+                          setSchema({
+                            ...schema,
+                            meta: {
+                              ...schema.meta,
+                              colorMode,
+                            },
+                          });
+                        }
+                      }}
+                    />
                   </Form.Item>
                 </Form>
               </Card>

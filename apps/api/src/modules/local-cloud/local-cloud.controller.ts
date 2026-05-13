@@ -71,6 +71,8 @@ type ScreenPreset = {
   service: '01-00-00-03' | '01-00-00-0c';
   magic: number;
   bpp: 1 | 2;
+  colorMode: 'bw' | 'bwr' | 'bwry';
+  packing?: '1bpp' | '2bpp' | 'bwr_planes';
   supersize?: boolean;
   mtu?: number;
   rotate: number;
@@ -100,16 +102,17 @@ const SVG_FONT_STACK = 'Arial, Microsoft YaHei, sans-serif';
 const OFFLINE_AFTER_MS = Number(process.env.AP_OFFLINE_AFTER_SECONDS ?? 90) * 1000;
 
 const SCREEN_PRESETS: ScreenPreset[] = [
-  { key: '17900170', width: 800, height: 480, service: '01-00-00-0c', magic: 0x0c, bpp: 2, supersize: true, mtu: 10000, rotate: 0, mirrorX: false, mode: '0C 800x480' },
-  { key: '1770008e', width: 648, height: 480, service: '01-00-00-03', magic: 0x0a, bpp: 2, rotate: 0, mirrorX: false, mode: '03-0A 648x480#b0y2r3w1' },
-  { key: '176002f7', width: 400, height: 300, service: '01-00-00-03', magic: 0x04, bpp: 2, rotate: 0, mirrorX: false, mode: '03-04 400x300#b0y2r3w1' },
-  { key: '17500175', width: 240, height: 416, service: '01-00-00-03', magic: 0x04, bpp: 2, rotate: 90, mirrorX: true, mode: '03-04 240x416#b0y2r3w1' },
-  { key: '174004d2', width: 184, height: 384, service: '01-00-00-03', magic: 0x03, bpp: 2, rotate: 90, mirrorX: false, mode: '03-03 184x384#b0y2r3w1' },
-  { key: '17200227', width: 152, height: 296, service: '01-00-00-03', magic: 0x02, bpp: 2, rotate: 90, mirrorX: true, mode: '03-02 152x296#b0y2r3w1' },
-  { key: '173014d6', width: 128, height: 296, service: '01-00-00-03', magic: 0x02, bpp: 2, rotate: 90, mirrorX: true, mode: '03-02 128x296#b0y2r3w1' },
-  { key: '1700009f', width: 200, height: 200, service: '01-00-00-03', magic: 0x02, bpp: 2, rotate: 90, mirrorX: false, mode: '03-02 200x200#b0y2r3w1' },
-  { key: '1710408c', width: 128, height: 250, service: '01-00-00-03', magic: 0x01, bpp: 2, rotate: 90, mirrorX: false, mode: '03-01 128x250#b0y2r3w1' },
-  { key: '15403fca', width: 128, height: 250, service: '01-00-00-03', magic: 0x01, bpp: 1, rotate: 90, mirrorX: false, mode: '03 128x250' },
+  { key: '17900170', width: 800, height: 480, service: '01-00-00-0c', magic: 0x0c, bpp: 2, colorMode: 'bwry', packing: '2bpp', supersize: true, mtu: 10000, rotate: 0, mirrorX: false, mode: '0C 800x480' },
+  { key: '1770008e', width: 648, height: 480, service: '01-00-00-03', magic: 0x0a, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 0, mirrorX: false, mode: '03-0A 648x480#b0y2r3w1' },
+  { key: '176002f7', width: 400, height: 300, service: '01-00-00-03', magic: 0x04, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 0, mirrorX: false, mode: '03-04 400x300#b0y2r3w1' },
+  { key: '17500175', width: 240, height: 416, service: '01-00-00-03', magic: 0x04, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 90, mirrorX: true, mode: '03-04 240x416#b0y2r3w1' },
+  { key: '174004d2', width: 184, height: 384, service: '01-00-00-03', magic: 0x03, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 90, mirrorX: false, mode: '03-03 184x384#b0y2r3w1' },
+  { key: '17200227', width: 152, height: 296, service: '01-00-00-03', magic: 0x02, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 90, mirrorX: true, mode: '03-02 152x296#b0y2r3w1' },
+  { key: '173014d6', width: 128, height: 296, service: '01-00-00-03', magic: 0x02, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 90, mirrorX: true, mode: '03-02 128x296#b0y2r3w1' },
+  { key: '1700009f', width: 200, height: 200, service: '01-00-00-03', magic: 0x02, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 90, mirrorX: false, mode: '03-02 200x200#b0y2r3w1' },
+  { key: '14371296', width: 128, height: 250, service: '01-00-00-03', magic: 0x01, bpp: 1, colorMode: 'bwr', packing: 'bwr_planes', rotate: 90, mirrorX: false, mode: '03-01 128x250#bwrplanes' },
+  { key: '1710408c', width: 128, height: 250, service: '01-00-00-03', magic: 0x01, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 90, mirrorX: false, mode: '03-01 128x250#b0y2r3w1' },
+  { key: '15403fca', width: 128, height: 250, service: '01-00-00-03', magic: 0x01, bpp: 1, colorMode: 'bw', packing: '1bpp', rotate: 90, mirrorX: false, mode: '03 128x250' },
 ];
 
 const LABEL_PRESET_KEYS: Record<string, string> = {
@@ -121,6 +124,7 @@ const LABEL_PRESET_KEYS: Record<string, string> = {
   '173014d6': '173014d6',
   '17200227': '17200227',
   '1710408c': '1710408c',
+  '14371296': '14371296',
   '1700009f': '1700009f',
   '15403fca': '15403fca',
 };
@@ -134,6 +138,7 @@ const LABEL_PREFIX_PRESET_KEYS: Array<{ prefix: string; key: string }> = [
   { prefix: '173', key: '173014d6' },
   { prefix: '172', key: '17200227' },
   { prefix: '171', key: '1710408c' },
+  { prefix: '143', key: '14371296' },
   { prefix: '170', key: '1700009f' },
   { prefix: '154', key: '15403fca' },
 ];
@@ -197,6 +202,29 @@ function isRecentActivity(value?: string) {
   }
   const time = new Date(value).getTime();
   return Number.isFinite(time) && Date.now() - time <= OFFLINE_AFTER_MS;
+}
+
+function apAutoImportEnabled(ap?: BaseStation | null) {
+  const config = ap?.config && typeof ap.config === 'object' ? ap.config as Row : {};
+  return config.autoImportScannedLabels === true;
+}
+
+function labelStatusValue(value: unknown): Label['status'] {
+  const status = stringValue(value, 'online');
+  return status === 'idle' || status === 'updating' || status === 'online' || status === 'offline' || status === 'failed'
+    ? status
+    : 'online';
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function averageRssiValue(value: unknown) {
+  if (!Array.isArray(value)) return undefined;
+  const readings = value.map((item) => Number(item)).filter((item) => Number.isFinite(item) && item !== 0);
+  if (!readings.length) return undefined;
+  return Math.round(readings.reduce((sum, item) => sum + item, 0) / readings.length);
 }
 
 function imageContentType(filename: string) {
@@ -293,7 +321,7 @@ function defaultSchema(template: Row) {
       deviceType: stringValue(template.deviceType, 'ET0750-89'),
       width,
       height,
-      colorMode: stringValue(template.colorMode, 'bwry'),
+      colorMode: stringValue(template.colorMode, 'bwr'),
       version: numberValue(template.version, 1),
     },
     datasource: ['name', 'price', 'sku', 'barcode', 'imageUrl'],
@@ -412,6 +440,7 @@ export class LocalCloudController {
     this.refreshQueue.registerHandler(({ taskId }) => this.executeQueuedRefreshTask(taskId));
     setTimeout(() => {
       this.ensureOwnershipBackfill();
+      this.recoverDiscoveredLabelsFromRequestLogs();
       void this.recoverQueuedRefreshTasks();
       this.startLabelKeepaliveLoops();
     }, 1000);
@@ -1171,6 +1200,9 @@ export class LocalCloudController {
       autoImportScannedLabels: enabled,
     };
     this.db.baseStations.set(ap.id, ap);
+    if (enabled) {
+      this.importDiscoveredLabelsForAp(ap);
+    }
     this.db.save();
     return this.localAp(ap, request);
   }
@@ -1183,7 +1215,11 @@ export class LocalCloudController {
 
   @Post('aps/:apId/search-devices')
   searchDevices(@Param('apId') apId: string, @Req() request: Request) {
-    this.assertRowVisible(this.findAp(apId) as BaseStation & Row, request, 'AP not found');
+    const ap = this.assertRowVisible(this.findAp(apId) as BaseStation & Row, request, 'AP not found') as BaseStation & Row;
+    if (apAutoImportEnabled(ap)) {
+      this.importDiscoveredLabelsForAp(ap);
+      this.db.save();
+    }
     return { ok: true, devices: this.localDevices(request).filter((item) => item.apId === apId) };
   }
 
@@ -1283,8 +1319,48 @@ export class LocalCloudController {
   @Post('tasks/:taskId/retry')
   async retryTask(@Param('taskId') taskId: string, @Req() request: Request) {
     const task = this.assertRowVisible(this.db.cloudTasks.get(taskId) as Row | undefined, request, 'Task not found');
-    const retry = await this.createRefreshTask(String(task.eslDeviceId ?? ''), 'retry_refresh', taskId);
-    return retry;
+    const status = stringValue(task.status).toLowerCase();
+    if (['queued', 'rendering', 'sending', 'success'].includes(status)) {
+      throw new BadRequestException('当前任务状态不允许手动重试');
+    }
+
+    const labelId = String(task.eslDeviceId ?? '');
+    const label = this.findLabel(labelId);
+    const apId = this.resolveDeliveryApId(label);
+    if (!apId) {
+      throw new BadRequestException('没有可用基站，无法手动重试');
+    }
+
+    const manualRetryCount = this.manualRetryCount(task) + 1;
+    const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
+    task.retryCount = manualRetryCount;
+    task.apId = apId;
+    task.status = 'sending';
+    task.resultMsg = `已提交第 ${manualRetryCount} 次手动重试，正在唤醒价签并重新下发。`;
+    task.payload = {
+      ...payload,
+      retryInFlight: true,
+      manualRetryInFlight: true,
+      manualRetryCount,
+      lastManualRetryAt: now(),
+    };
+    task.updatedAt = now();
+    this.db.cloudTasks.set(taskId, task);
+    this.db.save();
+
+    void this.runManualRetryLoop(taskId, manualRetryCount).catch((error) => {
+      const latest = this.db.cloudTasks.get(taskId);
+      if (!latest) return;
+      const latestPayload = latest.payload && typeof latest.payload === 'object' ? latest.payload as Row : {};
+      latest.status = 'failed';
+      latest.resultMsg = `手动重试失败：${error instanceof Error ? error.message : String(error)}`;
+      latest.payload = { ...latestPayload, retryInFlight: false, manualRetryInFlight: false };
+      latest.updatedAt = now();
+      this.db.cloudTasks.set(taskId, latest);
+      this.db.save();
+    });
+
+    return this.localTask(task, false);
   }
 
   @Delete('tasks/:taskId')
@@ -1552,7 +1628,7 @@ export class LocalCloudController {
       width: numberValue(input.width, 800),
       height: numberValue(input.height, 480),
       dpi: numberValue(input.dpi, 120),
-      colorMode: input.colorMode ?? 'bwry',
+      colorMode: this.normalizeTemplateColorMode(input.colorMode),
       status: input.status ?? 'draft',
       version: numberValue(input.version, 1),
       previewImageUrl: stringValue(input.previewImageUrl, this.templatePreviewUrl(templateId)),
@@ -1596,7 +1672,7 @@ export class LocalCloudController {
     };
   }
 
-  private async createRefreshTask(deviceId: string, taskType: string, parentTaskId?: string) {
+  private buildRefreshTask(deviceId: string, taskType: string, parentTaskId?: string) {
     const label = this.findLabel(deviceId);
     const apId = this.resolveDeliveryApId(label);
     const timestamp = now();
@@ -1623,22 +1699,45 @@ export class LocalCloudController {
       updatedAt: timestamp,
       eslDevice: this.localDevice(label, false),
     } as Row;
+    return task;
+  }
+
+  private async createRefreshTask(deviceId: string, taskType: string, parentTaskId?: string) {
+    const task = this.buildRefreshTask(deviceId, taskType, parentTaskId);
     this.db.cloudTasks.set(String(task.id), task);
     this.db.save();
-    await this.enqueueRefreshTask(apId, String(task.id));
+    await this.enqueueRefreshTask(stringValue(task.apId) || undefined, String(task.id));
     return task;
   }
 
   private async createRefreshTasksQueued(deviceIds: string[], taskType: string) {
     const tasks: Row[] = [];
-    const batchSize = Math.max(1, Math.min(100, Number(process.env.ESL_TASK_CREATE_BATCH_SIZE ?? 50)));
-    for (let index = 0; index < deviceIds.length; index += batchSize) {
-      const batch = deviceIds.slice(index, index + batchSize);
-      for (const deviceId of batch) {
-        tasks.push(await this.createRefreshTask(deviceId, taskType));
+    for (const deviceId of [...new Set(deviceIds)]) {
+      const task = this.buildRefreshTask(deviceId, taskType);
+      this.db.cloudTasks.set(String(task.id), task);
+      tasks.push(task);
+    }
+    this.db.save();
+    void this.enqueueRefreshTasksInBackground(tasks).catch((error) => {
+      this.db.recordRequest({
+        method: 'REFRESH-TASK-ENQUEUE',
+        path: '/tasks/enqueue',
+        statusCode: 500,
+        body: { taskType, count: tasks.length, error: error instanceof Error ? error.message : String(error) },
+      });
+    });
+    return tasks;
+  }
+
+  private async enqueueRefreshTasksInBackground(tasks: Row[]) {
+    const batchSize = Math.max(1, Math.min(100, Number(process.env.ESL_TASK_ENQUEUE_BATCH_SIZE ?? 50)));
+    for (let index = 0; index < tasks.length; index += batchSize) {
+      const batch = tasks.slice(index, index + batchSize);
+      await Promise.all(batch.map((task) => this.enqueueRefreshTask(stringValue(task.apId) || undefined, String(task.id))));
+      if (index + batchSize < tasks.length) {
+        await wait(25);
       }
     }
-    return tasks;
   }
 
   private supersedeQueuedRefreshTasks(labelId: string) {
@@ -1791,6 +1890,117 @@ export class LocalCloudController {
     });
   }
 
+  private autoRetryAttempts(task: Row) {
+    const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
+    return numberValue(payload.autoRetryAttempts, 0);
+  }
+
+  private manualRetryCount(task: Row) {
+    const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
+    if (payload.manualRetryCount !== undefined) {
+      return numberValue(payload.manualRetryCount, 0);
+    }
+    if (payload.lastAutoRetryAt || payload.autoRetryAttempts !== undefined || payload.autoRetryExhausted === true) {
+      return 0;
+    }
+    return numberValue(task.retryCount, 0);
+  }
+
+  private async runManualRetryLoop(taskId: string, manualRetryCount: number) {
+    const maxAttempts = Math.max(1, Math.min(3, Number(process.env.ESL_REFRESH_MANUAL_RETRY_ATTEMPTS ?? 3)));
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const task = this.db.cloudTasks.get(taskId);
+      if (!task || String(task.status ?? '') === 'success') return;
+
+      const labelId = String(task.eslDeviceId ?? '');
+      const label = this.findLabel(labelId);
+      const apId = this.resolveDeliveryApId(label);
+      if (!apId) {
+        task.status = 'failed';
+        task.resultMsg = '手动重试失败：没有可用基站。';
+        task.updatedAt = now();
+        this.db.cloudTasks.set(taskId, task);
+        this.db.save();
+        return;
+      }
+
+      const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
+      task.status = 'sending';
+      task.apId = apId;
+      task.resultMsg = `第 ${manualRetryCount} 次手动重试：第 ${attempt}/${maxAttempts} 轮唤醒并刷新中。`;
+      task.payload = {
+        ...payload,
+        retryInFlight: true,
+        manualRetryInFlight: true,
+        manualRetryCount,
+        manualRetryAttempt: attempt,
+        lastManualRetryAt: now(),
+      };
+      task.updatedAt = now();
+      this.db.cloudTasks.set(taskId, task);
+      this.db.save();
+
+      await this.runSilentWake([labelId], {
+        apId,
+        waitMs: Math.max(3000, Math.min(12000, Number(process.env.ESL_REFRESH_RETRY_WAKE_WAIT_MS ?? 4500))),
+        psmDurationMs: Math.max(3000, Math.min(30000, Number(process.env.ESL_REFRESH_RETRY_PSM_DURATION_MS ?? 12000))),
+        sendMqtt: true,
+        sendWs: true,
+        disconnectAfterProbe: true,
+      });
+
+      const latest = this.db.cloudTasks.get(taskId);
+      if (!latest || String(latest.status ?? '') === 'success') return;
+
+      const render = await this.renderTemplateForLabel(label);
+      const delivery = await this.deliverRefreshTask(label, render, latest.id);
+      latest.renderResult = {
+        width: render.width,
+        height: render.height,
+        colorMode: render.colorMode,
+        previewImageUrl: render.previewImageUrl,
+      };
+      latest.status = delivery.ok ? 'sending' : 'failed';
+      latest.resultMsg = delivery.ok
+        ? `第 ${manualRetryCount} 次手动重试已完成第 ${attempt}/${maxAttempts} 轮下发，正在等待价签确认。`
+        : delivery.reason;
+      latest.delivery = {
+        ...(delivery as Row),
+        manualRetryCount,
+        manualRetryAttempt: attempt,
+      };
+      const latestPayload = latest.payload && typeof latest.payload === 'object' ? latest.payload as Row : {};
+      latest.payload = {
+        ...latestPayload,
+        retryInFlight: false,
+        manualRetryInFlight: attempt < maxAttempts,
+        manualRetryCount,
+        manualRetryAttempt: attempt,
+        lastManualRetryAt: now(),
+      };
+      if (delivery.commandId) {
+        latest.payload = { ...(latest.payload as Row), commandId: delivery.commandId };
+      }
+      latest.updatedAt = now();
+      this.db.cloudTasks.set(taskId, latest);
+      this.db.save();
+
+      await wait(Math.max(1000, Math.min(8000, Number(process.env.ESL_REFRESH_MANUAL_RETRY_ROUND_DELAY_MS ?? 2500))));
+      const afterWait = this.db.cloudTasks.get(taskId);
+      if (!afterWait || String(afterWait.status ?? '') === 'success') return;
+    }
+
+    const task = this.db.cloudTasks.get(taskId);
+    if (!task || String(task.status ?? '') === 'success') return;
+    const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
+    task.status = 'failed';
+    task.resultMsg = `第 ${manualRetryCount} 次手动重试已完成 3 轮唤醒刷新，仍未收到价签确认。`;
+    task.payload = { ...payload, retryInFlight: false, manualRetryInFlight: false };
+    task.updatedAt = now();
+    this.db.cloudTasks.set(taskId, task);
+    this.db.save();
+  }
+
   private resolveEffectiveTemplateForLabel(label: Label & Row, request?: Request) {
     const product = label.productId
       ? this.visibleRows([...this.db.cloudProducts.values()], request).find((item) => item.id === label.productId) ?? null
@@ -1844,7 +2054,7 @@ export class LocalCloudController {
       taskIds,
       reasonCode: labels.length ? null : 'no_bound_devices',
       message: taskIds.length
-        ? `模板已发布，已自动创建 ${taskIds.length} 个标签刷新任务`
+        ? `模板已发布，已创建 ${taskIds.length} 个标签刷新任务，后台正在分批下发`
         : '模板已发布，但没有绑定标签，未自动下发',
     };
   }
@@ -1984,9 +2194,9 @@ export class LocalCloudController {
       this.db.save();
     }
 
-    const retryCount = numberValue(task.retryCount, 0);
+    const autoRetryAttempts = this.autoRetryAttempts(task);
     const maxRetries = Math.max(0, Math.min(5, Number(process.env.ESL_REFRESH_AUTO_RETRY_MAX ?? 3)));
-    if (retryCount >= maxRetries) {
+    if (autoRetryAttempts >= maxRetries) {
       task.status = 'failed';
       task.resultMsg = `刷新失败：已自动唤醒并重试 ${maxRetries} 次，仍未收到价签确认。`;
       task.updatedAt = now();
@@ -2021,12 +2231,11 @@ export class LocalCloudController {
       return;
     }
 
-    const nextRetryCount = retryCount + 1;
-    task.retryCount = nextRetryCount;
+    const nextAutoRetryAttempt = autoRetryAttempts + 1;
     task.status = 'sending';
-    task.resultMsg = `正在重新唤醒价签并第 ${nextRetryCount} 次补发刷新。`;
+    task.resultMsg = `正在重新唤醒价签并第 ${nextAutoRetryAttempt} 次自动补发刷新。`;
     task.updatedAt = now();
-    task.payload = { ...payload, retryInFlight: true, lastAutoRetryAt: now() };
+    task.payload = { ...payload, retryInFlight: true, autoRetryAttempts: nextAutoRetryAttempt, lastAutoRetryAt: now() };
     this.db.cloudTasks.set(taskId, task);
     this.db.save();
 
@@ -2055,11 +2264,11 @@ export class LocalCloudController {
       };
       freshTask.status = delivery.ok ? 'sending' : 'failed';
       freshTask.resultMsg = delivery.ok
-        ? `已自动唤醒并第 ${nextRetryCount} 次重新下发，正在等待价签确认。`
+        ? `已自动唤醒并第 ${nextAutoRetryAttempt} 次重新下发，正在等待价签确认。`
         : delivery.reason;
       freshTask.delivery = {
         ...(delivery as Row),
-        retryAttempt: nextRetryCount,
+        autoRetryAttempt: nextAutoRetryAttempt,
       };
       freshTask.payload = {
         ...(freshTask.payload && typeof freshTask.payload === 'object' ? freshTask.payload as Row : {}),
@@ -2087,7 +2296,7 @@ export class LocalCloudController {
       failedTask.updatedAt = now();
       this.db.cloudTasks.set(taskId, failedTask);
       this.db.save();
-      if (numberValue(failedTask.retryCount, 0) < maxRetries) {
+      if (this.autoRetryAttempts(failedTask) < maxRetries) {
         this.scheduleRefreshRetry(labelId, taskId);
       }
     }
@@ -2110,6 +2319,208 @@ export class LocalCloudController {
         });
       }
     }, intervalMs);
+  }
+
+  private importDiscoveredLabelsForAp(ap: BaseStation & Row) {
+    const discoveredLabels = ap.discoveredLabels && typeof ap.discoveredLabels === 'object'
+      ? ap.discoveredLabels as Record<string, Row>
+      : {};
+    const storeCode = stringValue(ap.storeCode, process.env.UPSTREAM_STORE_CODE ?? '20248517');
+    const timestamp = now();
+    let importedCount = 0;
+    for (const [rawLabelId, discovered] of Object.entries(discoveredLabels)) {
+      const labelId = stringValue((discovered as Row).eslCode, rawLabelId).toLowerCase();
+      if (!labelId) continue;
+      const current = this.db.labels.get(labelId);
+      const currentRow = (current ?? {}) as Label & Row;
+      const signal = numberValue((discovered as Row).signal, numberValue(current?.rssi, 0));
+      const label: Label & Row = {
+        ...currentRow,
+        id: labelId,
+        storeCode: current?.storeCode ?? storeCode,
+        apId: ap.id,
+        sku: current?.sku ?? labelId,
+        title: current?.title ?? `ESL ${labelId}`,
+        price: current?.price ?? 0,
+        currency: current?.currency ?? 'CNY',
+        status: labelStatusValue((discovered as Row).status),
+        battery: current?.battery,
+        rssi: signal,
+        services: recordValue((discovered as Row).services) ?? recordValue(currentRow.services),
+        ownerUserId: currentRow.ownerUserId ?? ap.ownerUserId,
+        updatedAt: stringValue((discovered as Row).lastSeenAt, timestamp),
+      };
+      this.db.labels.set(label.id, label);
+      importedCount += current ? 0 : 1;
+    }
+    ap.metrics = {
+      ...(ap.metrics ?? {}),
+      labelsOnline: Object.keys(discoveredLabels).length,
+      labelsTotal: Object.keys(discoveredLabels).length,
+    };
+    if (importedCount > 0) {
+      this.db.recordRequest({
+        method: 'AP-AUTO-IMPORT',
+        path: `/aps/${ap.id}/discovered-labels`,
+        statusCode: 200,
+        body: { apId: ap.id, importedCount, discoveredCount: Object.keys(discoveredLabels).length },
+      });
+    }
+  }
+
+  private recoverDiscoveredLabelsFromRequestLogs() {
+    const recovered = new Map<string, {
+      apId: string;
+      labelId: string;
+      payload: Row;
+      time: string;
+    }>();
+    let matchedBatches = 0;
+    let scannedLabelCount = 0;
+
+    for (const log of this.db.requestLogs) {
+      const parsed = this.parseDeviceRetrieveLog(log.body);
+      if (!parsed) continue;
+
+      const entries = Object.entries(parsed.data ?? {})
+        .map(([rawLabelId, payload]) => ({
+          labelId: stringValue(rawLabelId).toLowerCase(),
+          payload: recordValue(payload) ?? {},
+        }))
+        .filter((entry) => entry.labelId);
+      if (!entries.length) continue;
+
+      const ap = this.resolveRetrieveLogAp(entries.map((entry) => entry.labelId));
+      if (!ap) continue;
+
+      matchedBatches += 1;
+      scannedLabelCount += entries.length;
+      for (const entry of entries) {
+        if (!recovered.has(entry.labelId)) {
+          recovered.set(entry.labelId, {
+            apId: ap.id,
+            labelId: entry.labelId,
+            payload: entry.payload,
+            time: stringValue(log.time, now()),
+          });
+        }
+      }
+    }
+
+    if (!recovered.size) return;
+
+    const discoveredByAp = new Map<string, Record<string, Row>>();
+    let importedCount = 0;
+    for (const item of recovered.values()) {
+      const ap = this.db.baseStations.get(item.apId) as BaseStation & Row | undefined;
+      if (!ap) continue;
+
+      const discoveredLabels = discoveredByAp.get(ap.id)
+        ?? { ...((ap.discoveredLabels && typeof ap.discoveredLabels === 'object' ? ap.discoveredLabels : {}) as Record<string, Row>) };
+      const signal = averageRssiValue(item.payload.master_rx_rssi);
+      discoveredLabels[item.labelId] = {
+        eslCode: item.labelId,
+        status: 'online',
+        signal,
+        lastSeenAt: item.time,
+        source: 'DEVICE_RETRIEVE_LOG_RECOVERY',
+        services: recordValue(item.payload.service_list),
+      };
+      discoveredByAp.set(ap.id, discoveredLabels);
+
+      const current = this.db.labels.get(item.labelId);
+      if (current) continue;
+
+      const label: Label & Row = {
+        id: item.labelId,
+        storeCode: stringValue(ap.storeCode, process.env.UPSTREAM_STORE_CODE ?? '20248517'),
+        apId: ap.id,
+        sku: item.labelId,
+        title: `ESL ${item.labelId}`,
+        price: 0,
+        currency: 'CNY',
+        status: 'online',
+        rssi: signal,
+        services: recordValue(item.payload.service_list),
+        ownerUserId: stringValue(ap.ownerUserId),
+        updatedAt: item.time,
+      };
+      this.db.labels.set(label.id, label);
+      importedCount += 1;
+    }
+
+    for (const [apId, discoveredLabels] of discoveredByAp.entries()) {
+      const ap = this.db.baseStations.get(apId) as BaseStation & Row | undefined;
+      if (!ap) continue;
+      this.db.baseStations.set(ap.id, {
+        ...ap,
+        discoveredLabels: discoveredLabels as BaseStation['discoveredLabels'],
+        metrics: {
+          ...(ap.metrics ?? {}),
+          labelsOnline: Object.keys(discoveredLabels).length,
+          labelsTotal: Object.keys(discoveredLabels).length,
+        },
+      });
+    }
+
+    if (!importedCount && discoveredByAp.size === 0) return;
+    this.db.save();
+    if (importedCount > 0) {
+      this.db.recordRequest({
+        method: 'AP-LOG-RECOVERY',
+        path: '/request-logs/device-retrieve/recover',
+        statusCode: 200,
+        body: {
+          importedCount,
+          recoveredLabels: recovered.size,
+          matchedBatches,
+          scannedLabelCount,
+        },
+      });
+    }
+  }
+
+  private parseDeviceRetrieveLog(body: unknown): { data?: Record<string, unknown> } | undefined {
+    const row = recordValue(body);
+    const text = stringValue(row?.text);
+    if (!text || !text.includes('DEVICE_RETRIEVE')) return undefined;
+    try {
+      const parsed = JSON.parse(text) as Row;
+      return parsed.type === 'DEVICE_RETRIEVE' && recordValue(parsed.data)
+        ? { data: parsed.data as Record<string, unknown> }
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private resolveRetrieveLogAp(labelIds: string[]) {
+    const scores = new Map<string, number>();
+    for (const labelId of labelIds) {
+      const current = this.db.labels.get(labelId);
+      if (current?.apId) {
+        scores.set(current.apId, (scores.get(current.apId) ?? 0) + 1);
+      }
+    }
+    for (const ap of this.db.baseStations.values()) {
+      const discoveredLabels = ap.discoveredLabels ?? {};
+      let score = scores.get(ap.id) ?? 0;
+      for (const labelId of labelIds) {
+        if (discoveredLabels[labelId]) score += 1;
+      }
+      if (score > 0) scores.set(ap.id, score);
+    }
+
+    const [best] = [...scores.entries()].sort((left, right) => right[1] - left[1]);
+    if (best && best[1] >= Math.min(3, labelIds.length)) {
+      return this.db.baseStations.get(best[0]);
+    }
+
+    const autoImportAps = [...this.db.baseStations.values()].filter((ap) => apAutoImportEnabled(ap as BaseStation & Row));
+    if (autoImportAps.length === 1) return autoImportAps[0];
+
+    const onlineAps = [...this.db.baseStations.values()].filter((ap) => ap.status === 'online');
+    return onlineAps.length === 1 ? onlineAps[0] : undefined;
   }
 
   private async keepaliveLabelsForAp(apId: string) {
@@ -2386,12 +2797,16 @@ export class LocalCloudController {
       `${storeCode}/${apNoColonLower}/cmd`,
     ])];
     const preset = this.resolveScreenPreset(render, labelId);
+    const packetColorMode = this.normalizeTemplateColorMode(render.colorMode);
     const sourceRgba = preset.service === '01-00-00-0c'
       ? await this.renderIntoService0cCanvas(render, preset.width, preset.height)
       : await this.transformRenderedRgba(render.rgba, render.width, render.height, preset.width, preset.height, preset.rotate, preset.mirrorX);
-    const packedRows = preset.bpp === 1
-      ? this.packImage1Bpp(sourceRgba, preset.width, preset.height)
-      : this.packImage2Bpp(sourceRgba, preset.width, preset.height);
+    const packing = preset.packing ?? (preset.bpp === 1 ? '1bpp' : '2bpp');
+    const packedRows = packing === 'bwr_planes'
+      ? this.packImageBwrPlanes(sourceRgba, preset.width, preset.height)
+      : packing === '1bpp' || packetColorMode === 'bw'
+        ? this.packImage1Bpp(sourceRgba, preset.width, preset.height)
+        : this.packImage2Bpp(sourceRgba, preset.width, preset.height);
     const imageBytes = this.buildChunkedImageContainer(preset.magic, packedRows);
     const command: Row = {
       type: 'READ_WRITE_SVC',
@@ -2419,11 +2834,11 @@ export class LocalCloudController {
       command,
       payloadBytes: Buffer.byteLength(JSON.stringify(command)),
       imageBytes: imageBytes.length,
-      imageFormat: `${preset.service}/${preset.bpp}bpp`,
+      imageFormat: `${preset.service}/${packing === 'bwr_planes' ? 'bwr-planes' : `${packing === '1bpp' || packetColorMode === 'bw' ? 1 : 2}bpp`}`,
       renderMode: preset.mode,
       fit: 'stretch',
       resample: 'bilinear',
-      dither: true,
+      dither: packetColorMode !== 'bwr',
       width: preset.width,
       height: preset.height,
     };
@@ -2442,7 +2857,7 @@ export class LocalCloudController {
     const schema = (template.schema && typeof template.schema === 'object' ? template.schema : defaultSchema(template)) as Row;
     const width = numberValue(template.width, 800);
     const height = numberValue(template.height, 480);
-    const colorMode = stringValue(template.colorMode, 'bwry');
+    const colorMode = this.normalizeTemplateColorMode(template.colorMode);
     const normalizedSchema = resizeSchemaToCanvas(schema, width, height, stringValue(template.deviceType, 'ET0750-89'), colorMode);
     const bindings = this.buildTemplateBindings(label, product);
     const svg = await this.renderTemplateSvg(normalizedSchema, bindings, width, height);
@@ -2514,18 +2929,40 @@ export class LocalCloudController {
   }
 
   private resolveScreenPreset(render: RenderedTemplateImage, labelId?: string) {
-    const exact = SCREEN_PRESETS.find((preset) => preset.width === render.width && preset.height === render.height);
-    if (exact) return exact;
-    const rotated = SCREEN_PRESETS.find((preset) => preset.width === render.height && preset.height === render.width);
-    if (rotated) return rotated;
-
+    const colorMode = this.normalizeTemplateColorMode(render.colorMode);
     const normalizedLabelId = stringValue(labelId).toLowerCase();
     const explicitKey = LABEL_PRESET_KEYS[normalizedLabelId]
       ?? LABEL_PREFIX_PRESET_KEYS.find((item) => normalizedLabelId.startsWith(item.prefix))?.key;
     const explicit = explicitKey ? SCREEN_PRESETS.find((preset) => preset.key === explicitKey) : undefined;
     if (explicit) return explicit;
 
-    return SCREEN_PRESETS[0];
+    const exact = SCREEN_PRESETS.find((preset) => (
+      preset.width === render.width
+      && preset.height === render.height
+      && this.presetSupportsColorMode(preset, colorMode)
+    ));
+    if (exact) return exact;
+    const rotated = SCREEN_PRESETS.find((preset) => (
+      preset.width === render.height
+      && preset.height === render.width
+      && this.presetSupportsColorMode(preset, colorMode)
+    ));
+    if (rotated) return rotated;
+
+    return SCREEN_PRESETS.find((preset) => this.presetSupportsColorMode(preset, colorMode)) ?? SCREEN_PRESETS[0];
+  }
+
+  private normalizeTemplateColorMode(value: unknown): 'bw' | 'bwr' | 'bwry' {
+    const normalized = stringValue(value, 'bwr').toLowerCase();
+    if (['bw', 'black-white', '2', '2color', '2-color'].includes(normalized)) return 'bw';
+    if (['bwry', 'bwyr', '4', '4color', '4-color'].includes(normalized)) return 'bwry';
+    return 'bwr';
+  }
+
+  private presetSupportsColorMode(preset: ScreenPreset, colorMode: 'bw' | 'bwr' | 'bwry') {
+    if (preset.colorMode === colorMode) return true;
+    if (colorMode === 'bw') return true;
+    return false;
   }
 
   private async renderIntoService0cCanvas(render: RenderedTemplateImage, width: number, height: number) {
@@ -2618,6 +3055,31 @@ export class LocalCloudController {
       }
     }
     return output;
+  }
+
+  private packImageBwrPlanes(rgba: Buffer, width: number, height: number) {
+    const rowBytes = Math.ceil(width / 8);
+    const black = Buffer.alloc(rowBytes * height, 0xff);
+    const red = Buffer.alloc(rowBytes * height, 0x00);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const offset = (y * width + x) * 4;
+        const r = rgba[offset];
+        const g = rgba[offset + 1];
+        const b = rgba[offset + 2];
+        const max = Math.max(r, g, b);
+        const min = Math.min(r, g, b);
+        const redPixel = (r >= 150 && r - g >= 45 && r - b >= 55)
+          || (r >= 155 && g >= 115 && b <= 135 && r + g >= 290 && max - min >= 45);
+        const luminance = r * 0.299 + g * 0.587 + b * 0.114;
+        const blackPixel = !redPixel && luminance < 145 && max < 185;
+        const index = y * rowBytes + Math.floor(x / 8);
+        const mask = 1 << (7 - (x % 8));
+        if (blackPixel) black[index] &= ~mask;
+        if (redPixel) red[index] |= mask;
+      }
+    }
+    return Buffer.concat([black, red]);
   }
 
   private buildChunkedImageContainer(magic: number, rows: Buffer) {
@@ -2828,7 +3290,7 @@ export class LocalCloudController {
       deviceType: 'ET0750-89',
       width: 800,
       height: 480,
-      colorMode: 'bwry',
+      colorMode: 'bwr',
       status: 'published',
     });
   }
@@ -3320,7 +3782,7 @@ export class LocalCloudController {
         colorMode: renderResult.colorMode,
         previewImageUrl: renderResult.previewImageUrl,
       },
-      retryCount: task.retryCount,
+      retryCount: this.manualRetryCount(task),
       status: task.status,
       parentTaskId: task.parentTaskId,
       triggeredAt: task.triggeredAt,

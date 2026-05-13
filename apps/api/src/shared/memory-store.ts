@@ -407,13 +407,36 @@ export class MemoryStore implements OnModuleInit {
   }
 }
 
-function newerByUpdatedAt<T>(current: T | undefined, incoming: T) {
+function newerByUpdatedAt<T>(current: T | undefined, incoming: T): T {
   if (!current) return incoming;
   const currentRow = current as Record<string, unknown>;
   const incomingRow = incoming as Record<string, unknown>;
   const currentTime = Date.parse(String(currentRow.updatedAt ?? currentRow.createdAt ?? ''));
   const incomingTime = Date.parse(String(incomingRow.updatedAt ?? incomingRow.createdAt ?? ''));
-  if (!Number.isFinite(currentTime)) return incoming;
+  if (!Number.isFinite(currentTime) && !Number.isFinite(incomingTime)) {
+    return mergeJsonRichRow(current, incoming);
+  }
+  if (!Number.isFinite(currentTime)) {
+    return mergeJsonRichRow(incoming, current);
+  }
   if (!Number.isFinite(incomingTime)) return current;
-  return incomingTime >= currentTime ? incoming : current;
+  return incomingTime >= currentTime
+    ? mergeJsonRichRow(incoming, current)
+    : mergeJsonRichRow(current, incoming);
+}
+
+function mergeJsonRichRow<T>(winner: T, fallback: T) {
+  const output = { ...(fallback as Record<string, unknown>), ...(winner as Record<string, unknown>) };
+  for (const key of ['config', 'metrics', 'discoveredLabels']) {
+    const winnerValue = (winner as Record<string, unknown>)[key];
+    const fallbackValue = (fallback as Record<string, unknown>)[key];
+    if (isPlainObject(fallbackValue) && isPlainObject(winnerValue)) {
+      output[key] = { ...(fallbackValue as Record<string, unknown>), ...(winnerValue as Record<string, unknown>) };
+    }
+  }
+  return output as T;
+}
+
+function isPlainObject(value: unknown) {
+  return value && typeof value === 'object' && !Array.isArray(value);
 }
