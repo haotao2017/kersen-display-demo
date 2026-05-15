@@ -1,5 +1,6 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
 import * as bcrypt from 'bcryptjs';
 import { BaseStation, EslCommand, Label, OfficialDownlinkCapture, RequestLog, StoreConfig } from './models';
@@ -67,9 +68,11 @@ function migrateLegacyOwners(data: {
 }
 
 @Injectable()
-export class MemoryStore implements OnModuleInit {
+export class MemoryStore implements OnModuleInit, OnModuleDestroy {
   private readonly filePath = process.env.STORE_JSON_PATH || join(process.cwd(), 'data', 'store.json');
   private saveTimer?: ReturnType<typeof setTimeout>;
+  private jsonSaveTimer?: ReturnType<typeof setTimeout>;
+  private jsonSavePromise: Promise<void> = Promise.resolve();
   private savingPersistent = false;
   private pendingPersistentSave = false;
   readonly stores = new Map<string, StoreConfig>();
@@ -161,6 +164,15 @@ export class MemoryStore implements OnModuleInit {
     this.queuePersistentSave();
   }
 
+  async onModuleDestroy() {
+    if (this.jsonSaveTimer) {
+      clearTimeout(this.jsonSaveTimer);
+      this.jsonSaveTimer = undefined;
+    }
+    this.saveJson();
+    await this.jsonSavePromise.catch(() => undefined);
+  }
+
   createCommand(input: Omit<EslCommand, 'id' | 'status' | 'createdAt'>) {
     const command: EslCommand = {
       ...input,
@@ -181,7 +193,7 @@ export class MemoryStore implements OnModuleInit {
     };
     this.requestLogs.unshift(log);
     this.requestLogs.splice(1000);
-    this.save();
+    this.saveDeferred();
     return log;
   }
 
@@ -192,7 +204,17 @@ export class MemoryStore implements OnModuleInit {
   }
 
   save() {
+    this.queueJsonSave();
+    this.queuePersistentSave();
+  }
+
+  saveImmediate() {
     this.saveJson();
+    this.queuePersistentSave();
+  }
+
+  saveDeferred() {
+    this.queueJsonSave(Number(process.env.JSON_SAVE_DEBOUNCE_MS ?? 2000));
     this.queuePersistentSave();
   }
 
@@ -219,6 +241,38 @@ export class MemoryStore implements OnModuleInit {
         2,
       ),
     );
+  }
+
+  private queueJsonSave(delayMs = Number(process.env.JSON_SAVE_DEBOUNCE_MS ?? 750)) {
+    if (this.jsonSaveTimer) return;
+    this.jsonSaveTimer = setTimeout(() => {
+      this.jsonSaveTimer = undefined;
+      const snapshot = this.buildJsonSnapshot();
+      this.jsonSavePromise = this.jsonSavePromise
+        .catch(() => undefined)
+        .then(async () => {
+          await fs.mkdir(dirname(this.filePath), { recursive: true });
+          await fs.writeFile(this.filePath, JSON.stringify(snapshot, null, 2));
+        })
+        .catch(() => undefined);
+    }, Math.max(50, Math.min(30_000, delayMs)));
+  }
+
+  private buildJsonSnapshot() {
+    return {
+      stores: [...this.stores.values()],
+      baseStations: [...this.baseStations.values()],
+      labels: [...this.labels.values()],
+      commands: [...this.commands.values()],
+      cloudProducts: [...this.cloudProducts.values()],
+      cloudTemplates: [...this.cloudTemplates.values()],
+      cloudTasks: [...this.cloudTasks.values()],
+      users: [...this.users.values()],
+      userInvites: [...this.userInvites.values()],
+      auditLogs: this.auditLogs,
+      requestLogs: this.requestLogs,
+      officialDownlinkCaptures: this.officialDownlinkCaptures,
+    };
   }
 
   private queuePersistentSave() {

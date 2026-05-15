@@ -62,6 +62,15 @@ async function bootstrap() {
       if (path.startsWith('/api/device-logs')) {
         return;
       }
+      if (req.method === 'GET' && (
+        path.startsWith('/api/v1/tasks')
+        || path.startsWith('/api/v1/products')
+        || path.startsWith('/api/v1/templates')
+        || path.startsWith('/api/v1/esl-devices')
+        || path.startsWith('/api/v1/dashboard')
+      )) {
+        return;
+      }
       if (isConsoleNoise(path, req.ip, req.headers['user-agent'])) {
         return;
       }

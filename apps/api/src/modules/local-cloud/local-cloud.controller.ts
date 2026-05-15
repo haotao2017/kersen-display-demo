@@ -94,12 +94,18 @@ type SilentWakeResult = {
 const now = () => new Date().toISOString();
 const id = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const AUTO_RETRY_LOCK_TTL_MS = 60_000;
 const getUploadDir = () => process.env.UPLOAD_DIR || join(process.cwd(), 'uploads');
 const DEFAULT_TEMPLATE_ID = 'template_default_750_480';
 const DEFAULT_TEMPLATE_DELETED_MARKER = '.default-template-deleted';
 const SVG_FONT_STACK = 'Arial, Microsoft YaHei, sans-serif';
 const OFFLINE_AFTER_MS = Number(process.env.AP_OFFLINE_AFTER_SECONDS ?? 90) * 1000;
+const LABEL_OFFLINE_AFTER_MS = Math.max(180_000, Math.min(900_000, Number(process.env.LABEL_OFFLINE_AFTER_SECONDS ?? 300) * 1000));
+const REFRESH_DEFERRED_RETRY_DELAY_MS = Math.max(5_000, Math.min(300_000, Number(process.env.ESL_REFRESH_DEFERRED_RETRY_DELAY_MS ?? 30_000)));
+const REFRESH_DEFERRED_RETRY_MAX = Math.max(1, Math.min(20, Number(process.env.ESL_REFRESH_DEFERRED_RETRY_MAX ?? 10)));
+const AP_ONLINE_LABEL_TRUST_DELAY_MS = Math.max(0, Math.min(900_000, Number(process.env.AP_ONLINE_LABEL_TRUST_DELAY_MS ?? 600_000)));
+const LABEL_ONLINE_STABLE_MS = Math.max(60_000, Math.min(3_600_000, Number(process.env.LABEL_ONLINE_STABLE_SECONDS ?? 900) * 1000));
+const LABEL_OFFLINE_PROBE_RETRY_DELAY_MS = Math.max(5_000, Math.min(300_000, Number(process.env.LABEL_OFFLINE_PROBE_RETRY_DELAY_MS ?? 30_000)));
+const LABEL_OFFLINE_PROBE_MAX = Math.max(1, Math.min(10, Number(process.env.LABEL_OFFLINE_PROBE_MAX ?? 3)));
 
 const SCREEN_PRESETS: ScreenPreset[] = [
   { key: '17900170', width: 800, height: 480, service: '01-00-00-0c', magic: 0x0c, bpp: 2, colorMode: 'bwry', packing: '2bpp', supersize: true, mtu: 10000, rotate: 0, mirrorX: false, mode: '0C 800x480' },
@@ -168,6 +174,15 @@ function stringValue(value: unknown, fallback = '') {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
+function bindingTextValue(value: unknown, fallback = '') {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === 'string') return value.trim() ? value.trim() : fallback;
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : fallback;
+  if (typeof value === 'bigint') return String(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return fallback;
+}
+
 function normalizeRole(value: unknown, fallback: UserRole = 'VIEWER'): UserRole {
   const role = stringValue(value, fallback).toUpperCase();
   return role === 'ADMIN' || role === 'OPERATOR' || role === 'VIEWER' ? role : fallback;
@@ -202,6 +217,11 @@ function isRecentActivity(value?: string) {
   }
   const time = new Date(value).getTime();
   return Number.isFinite(time) && Date.now() - time <= OFFLINE_AFTER_MS;
+}
+
+function isWithinMs(value: unknown, maxAgeMs: number) {
+  const time = new Date(String(value ?? '')).getTime();
+  return Number.isFinite(time) && Date.now() - time <= maxAgeMs;
 }
 
 function apAutoImportEnabled(ap?: BaseStation | null) {
@@ -387,6 +407,10 @@ function ownershipFingerprint(snapshot: {
   });
 }
 
+function isAdminRoleValue(value: unknown) {
+  return normalizeRole(value) === 'ADMIN';
+}
+
 function resizeSchemaToCanvas(schema: Row, width: number, height: number, deviceType: string, colorMode: string) {
   const meta = (schema.meta && typeof schema.meta === 'object' ? schema.meta : {}) as Row;
   const oldWidth = numberValue(meta.width, width);
@@ -427,6 +451,10 @@ function resizeSchemaToCanvas(schema: Row, width: number, height: number, device
 @Controller('api/v1')
 export class LocalCloudController {
   private readonly refreshWindowUntilByAp = new Map<string, number>();
+  private readonly labelKeepaliveCursorByAp = new Map<string, number>();
+  private readonly labelKeepaliveInFlightByAp = new Set<string>();
+  private readonly deferredRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly labelOfflineProbeTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private labelKeepaliveTimer?: ReturnType<typeof setInterval>;
 
   constructor(
@@ -441,7 +469,9 @@ export class LocalCloudController {
     setTimeout(() => {
       this.ensureOwnershipBackfill();
       this.recoverDiscoveredLabelsFromRequestLogs();
+      this.recoverLabelsFromDiscoveredCaches();
       void this.recoverQueuedRefreshTasks();
+      this.startQueuedTaskReconciler();
       this.startLabelKeepaliveLoops();
     }, 1000);
   }
@@ -570,13 +600,14 @@ export class LocalCloudController {
   @Get('dashboard/summary')
   dashboard(@Req() request: Request) {
     const aps = this.localAps(request);
-    const devices = this.visibleDeviceLabels(request);
+    const devices = this.visibleDeviceLabels(request).map((label) => this.localDeviceListItem(label, request));
     const today = new Date().toISOString().slice(0, 10);
     const tasks = this.visibleRows([...this.db.cloudTasks.values()], request);
     return {
       apOnlineCount: aps.filter((item) => item.online).length,
       apOfflineCount: aps.filter((item) => !item.online).length,
-      deviceOnlineCount: devices.filter((item) => isRecentActivity(item.updatedAt) && item.status !== 'idle' && item.status !== 'offline').length,
+      deviceOnlineCount: devices.filter((item) => item.status !== 'idle' && item.status !== 'offline').length,
+      deviceOfflineCount: devices.filter((item) => item.status === 'offline').length,
       todayTaskSuccess: tasks.filter((item) => String(item.status) === 'success' && String(item.updatedAt ?? '').startsWith(today)).length,
       recentApEvents: aps.slice(0, 5).map((ap) => ({
         type: 'ap',
@@ -671,17 +702,36 @@ export class LocalCloudController {
 
   @Post('products')
   createProduct(@Body() body: Row, @Req() request: Request) {
-    const product = this.upsertProduct({ ...body, id: id('product'), ownerUserId: this.ownerUserIdForWrite(body, request) });
+    const ownerUserId = this.ownerUserIdForWrite(body, request);
+    const storeCode = stringValue(body.storeCode, stringValue([...this.db.stores.values()][0]?.code));
+    const sku = stringValue(body.sku, stringValue(body.barcode));
+    const barcode = stringValue(body.barcode, sku);
+    const duplicate = [...this.db.cloudProducts.values()].find((product) => (
+      String(product.ownerUserId ?? '') === ownerUserId
+      && stringValue(product.storeCode, storeCode) === storeCode
+      && (
+        (sku && stringValue(product.sku) === sku)
+        || (barcode && stringValue(product.barcode) === barcode)
+      )
+    ));
+    if (duplicate) {
+      throw new BadRequestException('同一账号/门店下已存在相同来源编号或参考值的数据源');
+    }
+    const product = this.upsertProduct({ ...body, id: id('product'), ownerUserId });
     return product;
   }
 
   @Get('products/:productId')
   product(@Param('productId') productId: string, @Req() request: Request) {
     const product = this.assertRowVisible(this.findProduct(productId), request, 'Product not found');
+    const boundLabels = [...this.db.labels.values()]
+      .map((label) => label as Label & Row)
+      .filter((label) => String(label.productId ?? '') === productId && this.canAccessRow(label, request));
     return {
       ...product,
       defaultTemplate: product.defaultTemplateId ? this.visibleRows([...this.db.cloudTemplates.values()], request).find((item) => item.id === product.defaultTemplateId) ?? null : null,
-      boundDevices: this.localDevices(request).filter((item) => item.productId === productId),
+      bindDeviceCount: boundLabels.length,
+      boundDevices: [],
     };
   }
 
@@ -689,7 +739,7 @@ export class LocalCloudController {
   async updateProduct(@Param('productId') productId: string, @Body() body: Row, @Req() request: Request) {
     const current = this.assertRowVisible(this.findProduct(productId), request, 'Product not found');
     const product = this.upsertProduct({ ...current, ...body, id: productId });
-    const refresh = await this.refreshLinkedProductDevices(productId, 'product_update_refresh', request);
+    const refresh = this.refreshLinkedProductDevices(productId, 'product_update_refresh', request);
     return {
       ...product,
       refresh,
@@ -724,7 +774,7 @@ export class LocalCloudController {
   }
 
   @Post('products/:productId/refresh-linked-devices')
-  async refreshProduct(@Param('productId') productId: string, @Req() request: Request) {
+  refreshProduct(@Param('productId') productId: string, @Req() request: Request) {
     this.assertRowVisible(this.findProduct(productId), request, 'Product not found');
     return this.refreshLinkedProductDevices(productId, 'product_refresh', request);
   }
@@ -816,7 +866,7 @@ export class LocalCloudController {
   }
 
   @Post('templates/:templateId/publish')
-  async publishTemplate(@Param('templateId') templateId: string, @Body() body: Row, @Req() request: Request) {
+  publishTemplate(@Param('templateId') templateId: string, @Body() body: Row, @Req() request: Request) {
     const current = this.assertRowVisible(this.findTemplate(templateId), request, 'Template not found');
     const template = this.upsertTemplate({
       ...current,
@@ -826,10 +876,10 @@ export class LocalCloudController {
     });
     const refreshLinkedDevices = body.refreshLinkedDevices !== false;
     const refresh = refreshLinkedDevices
-      ? await this.refreshTemplateLinkedDevices(templateId, 'template_publish_refresh', request)
+      ? this.refreshTemplateLinkedDevices(templateId, 'template_publish_refresh', request)
       : {
           attempted: false,
-          boundDeviceCount: this.localDevices(request).filter((item) => item.templateId === templateId).length,
+          boundDeviceCount: this.countTemplateLinkedLabels(templateId, request),
           refreshableDeviceCount: 0,
           skippedDeviceCount: 0,
           createdTaskCount: 0,
@@ -1115,11 +1165,18 @@ export class LocalCloudController {
   }
 
   @Get('esl-devices/:deviceId/tasks')
-  deviceTasks(@Param('deviceId') deviceId: string, @Req() request: Request) {
+  deviceTasks(@Param('deviceId') deviceId: string, @Query() query: Row, @Req() request: Request) {
     this.assertRowVisible(this.findLabel(deviceId) as Label & Row, request, 'Display node not found');
-    return [...this.db.cloudTasks.values()]
+    const tasks = [...this.db.cloudTasks.values()]
       .filter((item) => item.eslDeviceId === deviceId && this.canAccessRow(item as Row, request))
-      .map((item) => this.localTask(item, false));
+      .reverse();
+    const { page, pageSize, start, end } = paginationParams(query);
+    return {
+      items: tasks.slice(start, end).map((item) => this.localTaskListItem(item)),
+      page,
+      pageSize,
+      total: tasks.length,
+    };
   }
 
   @Get('aps')
@@ -1303,7 +1360,7 @@ export class LocalCloudController {
     );
     const { page, pageSize, start, end } = paginationParams(query);
     return {
-      items: tasks.slice(start, end).map((item) => this.localTask(item, false)),
+      items: tasks.slice(start, end).map((item) => this.localTaskListItem(item)),
       page,
       pageSize,
       total: tasks.length,
@@ -1371,6 +1428,31 @@ export class LocalCloudController {
     return { deleted: true, id: taskId };
   }
 
+  @Post('tasks/cleanup-stuck')
+  cleanupStuckTasks(@Body() body: Row, @Req() request: Request) {
+    this.requireAdminUser(request);
+    const statuses = Array.isArray(body.statuses)
+      ? new Set(body.statuses.map((item) => stringValue(item).toLowerCase()).filter(Boolean))
+      : new Set(['queued', 'rendering', 'sending', 'trigger_pending', 'timeout']);
+    let updatedCount = 0;
+    for (const task of this.visibleRows([...this.db.cloudTasks.values()], request)) {
+      const status = stringValue(task.status).toLowerCase();
+      if (!statuses.has(status)) continue;
+      this.clearDeferredRefreshTimer(String(task.id ?? ''));
+      const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
+      task.status = stringValue(body.nextStatus, 'cancelled');
+      task.payload = { ...payload, retryInFlight: false, cleanupReason: 'admin_cleanup_stuck_tasks' };
+      task.resultMsg = stringValue(body.reason, '发布清理：旧批量刷新任务已取消，请重新触发刷新。');
+      task.updatedAt = now();
+      this.db.cloudTasks.set(String(task.id), task);
+      updatedCount += 1;
+    }
+    if (updatedCount > 0) {
+      this.db.save();
+    }
+    return { ok: true, updatedCount, statuses: [...statuses] };
+  }
+
   @Post('tasks/batch-refresh')
   async batchRefresh(@Body() body: Row, @Req() request: Request) {
     const visibleIds = new Set(this.localDevices(request).map((item) => String(item.id)));
@@ -1382,23 +1464,35 @@ export class LocalCloudController {
   }
 
   @Get('users')
-  users(@Req() request: Request) {
-    this.requireAdminUser(request);
-    return [...this.db.users.values()].map((user) => this.localUser(user));
+  users(@Query() query: Row, @Req() request: Request) {
+    const currentUser = this.requireAdminUser(request);
+    const users = [...this.db.users.values()]
+      .filter((user) => String(user.id ?? '') === String(currentUser.id ?? '') || !this.isAdminUser(user))
+      .filter((user) => {
+        const keyword = stringValue(query.keyword).toLowerCase();
+        if (!keyword) return true;
+        return [user.username, user.displayName, user.email, user.role]
+          .map((item) => stringValue(item).toLowerCase())
+          .join(' ')
+          .includes(keyword);
+      })
+      .map((user) => this.localUser(user));
+    return paginate(users, query);
   }
 
   @Get('users/invites')
-  invites(@Req() request: Request) {
+  invites(@Query() query: Row, @Req() request: Request) {
     this.requireAdminUser(request);
-    return [...this.db.userInvites.values()]
+    const invites = [...this.db.userInvites.values()]
       .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))
       .map((invite) => this.localInvite(invite));
+    return paginate(invites, query);
   }
 
   @Get('users/audit-logs')
-  auditLogs(@Req() request: Request) {
+  auditLogs(@Query() query: Row, @Req() request: Request) {
     this.requireAdminUser(request);
-    return this.db.auditLogs.slice(0, 200);
+    return paginate(this.db.auditLogs, query);
   }
 
   @Get('users/:userId')
@@ -1676,11 +1770,12 @@ export class LocalCloudController {
     const label = this.findLabel(deviceId);
     const apId = this.resolveDeliveryApId(label);
     const timestamp = now();
+    const taskId = id('task');
     if (!parentTaskId) {
-      this.supersedeQueuedRefreshTasks(label.id);
+      this.supersedePendingRefreshTasks(label.id, taskId);
     }
     const task = {
-      id: id('task'),
+      id: taskId,
       taskType,
       eslDeviceId: deviceId,
       apId,
@@ -1689,7 +1784,7 @@ export class LocalCloudController {
       ownerUserId: (label as Label & Row).ownerUserId,
       owner: this.ownerSummary((label as Label & Row).ownerUserId),
       storeCode: label.storeCode,
-      payload: { labelId: label.id, localRenderer: true },
+      payload: { labelId: label.id, localRenderer: true, refreshGeneration: taskId },
       renderResult: {},
       retryCount: 0,
       status: 'queued',
@@ -1697,7 +1792,15 @@ export class LocalCloudController {
       triggeredAt: timestamp,
       createdAt: timestamp,
       updatedAt: timestamp,
-      eslDevice: this.localDevice(label, false),
+      eslDevice: {
+        id: label.id,
+        eslCode: label.id,
+        name: label.title,
+        apId: label.apId,
+        productId: (label as Label & Row).productId,
+        templateId: (label as Label & Row).templateId,
+        status: label.status,
+      },
     } as Row;
     return task;
   }
@@ -1729,32 +1832,118 @@ export class LocalCloudController {
     return tasks;
   }
 
+  private createRefreshTasksQueuedFast(deviceIds: string[], taskType: string) {
+    const uniqueIds = [...new Set(deviceIds)];
+    const batchSize = Math.max(1, Math.min(25, Number(process.env.ESL_TASK_CREATE_BACKGROUND_BATCH_SIZE ?? 10)));
+    const batchDelayMs = Math.max(25, Math.min(2000, Number(process.env.ESL_TASK_CREATE_BACKGROUND_DELAY_MS ?? 150)));
+
+    setTimeout(() => void (async () => {
+      const tasks: Row[] = [];
+      for (let index = 0; index < uniqueIds.length; index += batchSize) {
+        const batch = uniqueIds.slice(index, index + batchSize);
+        for (const deviceId of batch) {
+          const task = this.buildRefreshTask(deviceId, taskType);
+          this.db.cloudTasks.set(String(task.id), task);
+          tasks.push(task);
+        }
+        this.db.saveDeferred();
+        void this.enqueueRefreshTasksInBackground(tasks.splice(0)).catch((error) => {
+          this.db.recordRequest({
+            method: 'REFRESH-TASK-ENQUEUE',
+            path: '/tasks/enqueue',
+            statusCode: 500,
+            body: { taskType, count: batch.length, error: error instanceof Error ? error.message : String(error) },
+          });
+        });
+        if (index + batchSize < uniqueIds.length) {
+          await wait(batchDelayMs);
+        }
+      }
+    })().catch((error) => {
+      this.db.recordRequest({
+        method: 'REFRESH-TASK-BACKGROUND',
+        path: '/tasks/background-create',
+        statusCode: 500,
+        body: { taskType, count: uniqueIds.length, error: error instanceof Error ? error.message : String(error) },
+      });
+    }), 0);
+
+    return uniqueIds.map((deviceId) => `${taskType}:pending:${deviceId}`);
+  }
+
   private async enqueueRefreshTasksInBackground(tasks: Row[]) {
-    const batchSize = Math.max(1, Math.min(100, Number(process.env.ESL_TASK_ENQUEUE_BATCH_SIZE ?? 50)));
+    const batchSize = Math.max(1, Math.min(20, Number(process.env.ESL_TASK_ENQUEUE_BATCH_SIZE ?? 10)));
     for (let index = 0; index < tasks.length; index += batchSize) {
-      const batch = tasks.slice(index, index + batchSize);
+      const batch = tasks
+        .slice(index, index + batchSize)
+        .filter((task) => this.isTaskStillCurrentBeforeQueue(task));
       await Promise.all(batch.map((task) => this.enqueueRefreshTask(stringValue(task.apId) || undefined, String(task.id))));
       if (index + batchSize < tasks.length) {
-        await wait(25);
+        await wait(100);
       }
     }
   }
 
-  private supersedeQueuedRefreshTasks(labelId: string) {
+  private supersedePendingRefreshTasks(labelId: string, nextTaskId?: string) {
+    const supersedableStatuses = new Set(['queued', 'trigger_pending', 'rendering', 'timeout']);
     for (const task of this.db.cloudTasks.values()) {
       if (
         String(task.eslDeviceId ?? '') === labelId
-        && String(task.status ?? '') === 'queued'
+        && supersedableStatuses.has(String(task.status ?? ''))
         && !task.parentTaskId
+        && String(task.id ?? '') !== nextTaskId
       ) {
+        this.clearDeferredRefreshTimer(String(task.id ?? ''));
+        const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
         task.status = 'superseded';
-        task.resultMsg = '同一标签已有新的刷新任务，旧的未执行任务已自动合并为最后一次刷新';
+        task.payload = { ...payload, supersededByTaskId: nextTaskId };
+        task.resultMsg = '同一标签已有新的刷新任务，旧的未执行任务已自动由最后一次刷新覆盖';
         task.updatedAt = now();
       }
     }
   }
 
+  private isTaskStillCurrentBeforeQueue(task: Row) {
+    const latest = this.db.cloudTasks.get(String(task.id ?? ''));
+    if (!latest || ['superseded', 'cancelled', 'skipped', 'success'].includes(String(latest.status ?? ''))) {
+      return false;
+    }
+    return !this.supersedeIfStaleRefreshTask(latest);
+  }
+
+  private supersedeIfStaleRefreshTask(task: Row) {
+    if (task.parentTaskId) return false;
+    const taskId = String(task.id ?? '');
+    const labelId = String(task.eslDeviceId ?? '');
+    if (!taskId || !labelId) return false;
+
+    const activeNewerStatuses = new Set(['queued', 'trigger_pending', 'rendering', 'sending', 'timeout']);
+    const taskTime = new Date(String(task.createdAt ?? task.triggeredAt ?? '')).getTime();
+    const hasNewer = [...this.db.cloudTasks.values()].some((candidate) => {
+      if (String(candidate.id ?? '') === taskId) return false;
+      if (String(candidate.eslDeviceId ?? '') !== labelId) return false;
+      if (candidate.parentTaskId) return false;
+      if (!activeNewerStatuses.has(String(candidate.status ?? ''))) return false;
+      const candidateTime = new Date(String(candidate.createdAt ?? candidate.triggeredAt ?? '')).getTime();
+      if (Number.isFinite(taskTime) && Number.isFinite(candidateTime) && candidateTime <= taskTime) return false;
+      return Number.isFinite(candidateTime) || String(candidate.id ?? '') > taskId;
+    });
+    if (!hasNewer) return false;
+
+    this.clearDeferredRefreshTimer(taskId);
+    const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
+    task.status = 'superseded';
+    task.payload = { ...payload, supersededByNewerRefresh: true };
+    task.resultMsg = '同一标签已有更新的刷新任务，本次旧任务已自动跳过';
+    task.updatedAt = now();
+    this.db.cloudTasks.set(taskId, task);
+    this.db.saveDeferred();
+    return true;
+  }
+
   private async enqueueRefreshTask(apId: string | undefined, taskId: string) {
+    const pendingTask = this.db.cloudTasks.get(taskId);
+    if (pendingTask && this.supersedeIfStaleRefreshTask(pendingTask)) return;
     if (!apId) {
       const task = this.db.cloudTasks.get(taskId);
       if (task) {
@@ -1772,7 +1961,9 @@ export class LocalCloudController {
 
   private async executeQueuedRefreshTask(taskId: string) {
     const task = this.db.cloudTasks.get(taskId);
-    if (!task || String(task.status ?? '') !== 'queued') return;
+    if (!task || !['queued', 'trigger_pending'].includes(String(task.status ?? ''))) return { holdSlot: false };
+    if (this.supersedeIfStaleRefreshTask(task)) return { holdSlot: false };
+    this.clearDeferredRefreshTimer(taskId);
     if (task.parentTaskId) {
       const parent = this.db.cloudTasks.get(String(task.parentTaskId));
       if (parent && String(parent.status ?? '') === 'success') {
@@ -1781,48 +1972,146 @@ export class LocalCloudController {
         task.updatedAt = now();
         this.db.cloudTasks.set(taskId, task);
         this.db.save();
-        return;
+        return { holdSlot: false };
       }
+    }
+
+    const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
+    const deferredAttempts = numberValue(payload.deferredRetryAttempts, 0);
+    if (String(task.status ?? '') === 'trigger_pending' && deferredAttempts >= REFRESH_DEFERRED_RETRY_MAX) {
+      task.status = 'failed';
+      task.resultMsg = `刷新失败：待触发期间已间隔重试 ${REFRESH_DEFERRED_RETRY_MAX} 次，仍未收到价签确认。请确认标签在基站范围内且在线后手动重试。`;
+      task.payload = { ...payload, retryInFlight: false, deferredRetryExhausted: true };
+      task.updatedAt = now();
+      this.db.cloudTasks.set(taskId, task);
+      this.db.saveDeferred();
+      return { holdSlot: false };
     }
 
     const labelId = String(task.eslDeviceId ?? '');
     const label = this.findLabel(labelId);
-    task.status = 'rendering';
-    task.resultMsg = '任务已进入 AP 下发队列，正在生成刷新图片';
-    task.updatedAt = now();
-    this.db.cloudTasks.set(taskId, task);
-    this.db.save();
-
     try {
+      const wake = await this.ensureLabelReadyForRefresh(task, label);
+      if (!wake.ok) return { holdSlot: false };
+
+      const latestBeforeRender = this.db.cloudTasks.get(taskId);
+      if (!latestBeforeRender || String(latestBeforeRender.status ?? '') !== 'queued') return { holdSlot: false };
+      if (this.supersedeIfStaleRefreshTask(latestBeforeRender)) return { holdSlot: false };
+
+      latestBeforeRender.status = 'rendering';
+      latestBeforeRender.resultMsg = '任务已进入 AP 下发队列，正在生成刷新图片';
+      latestBeforeRender.updatedAt = now();
+      this.db.cloudTasks.set(taskId, latestBeforeRender);
+      this.db.saveDeferred();
+
       const render = await this.renderTemplateForLabel(label);
-      task.renderResult = {
+      const latestBeforeDelivery = this.db.cloudTasks.get(taskId);
+      if (!latestBeforeDelivery || String(latestBeforeDelivery.status ?? '') !== 'rendering') return { holdSlot: false };
+      if (this.supersedeIfStaleRefreshTask(latestBeforeDelivery)) return { holdSlot: false };
+      latestBeforeDelivery.renderResult = {
         width: render.width,
         height: render.height,
         colorMode: render.colorMode,
         previewImageUrl: render.previewImageUrl,
       };
-      const delivery = await this.deliverRefreshTask(label, render, task.id);
-      task.status = delivery.ok ? 'sending' : 'failed';
-      task.resultMsg = delivery.reason;
-      task.delivery = delivery;
-      task.updatedAt = now();
+      const delivery = await this.deliverRefreshTask(label, render, latestBeforeDelivery.id);
+      latestBeforeDelivery.status = delivery.ok ? 'sending' : 'failed';
+      latestBeforeDelivery.resultMsg = delivery.reason;
+      latestBeforeDelivery.delivery = delivery;
+      latestBeforeDelivery.updatedAt = now();
       if (delivery.commandId) {
-        task.payload = { ...(task.payload as Row), commandId: delivery.commandId };
+        latestBeforeDelivery.payload = { ...(latestBeforeDelivery.payload as Row), commandId: delivery.commandId };
       }
-      this.db.cloudTasks.set(taskId, task);
-      this.db.save();
-      this.scheduleRefreshRetry(label.id, taskId);
+      this.db.cloudTasks.set(taskId, latestBeforeDelivery);
+      this.db.saveDeferred();
+      this.scheduleDeferredRefreshRetry(label.id, taskId);
     } catch (error) {
       task.status = 'failed';
       task.resultMsg = `刷新任务执行失败：${error instanceof Error ? error.message : String(error)}`;
       task.updatedAt = now();
       this.db.cloudTasks.set(taskId, task);
-      this.db.save();
+      this.db.saveDeferred();
     }
   }
 
+  private async ensureLabelReadyForRefresh(task: Row, label: Label) {
+    const labelStatus = this.effectiveLabelStatus(label);
+    const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
+    const apId = this.resolveDeliveryApId(label);
+    const alreadyVerified = this.hasRecentVerifiedLabelContact(label, LABEL_ONLINE_STABLE_MS, apId);
+    if (labelStatus === 'online' && alreadyVerified && payload.preflightWakeRequired !== true) {
+      return { ok: true, alreadyOnline: true };
+    }
+
+    const maxAttempts = Math.max(1, Math.min(3, Number(process.env.ESL_REFRESH_OFFLINE_WAKE_ATTEMPTS ?? 3)));
+    if (!apId) {
+      task.status = 'failed';
+      task.resultMsg = '刷新失败：没有可用基站。请确认基站在线后重试。';
+      task.payload = { ...payload, preflightWakeRequired: true, preflightWakeAttempts: 0 };
+      task.updatedAt = now();
+      this.db.cloudTasks.set(String(task.id), task);
+      this.db.saveDeferred();
+      return { ok: false };
+    }
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      task.status = 'trigger_pending';
+      task.apId = apId;
+      task.resultMsg = `标签当前未确认在线，正在第 ${attempt}/${maxAttempts} 次尝试唤醒连接。`;
+      task.payload = {
+        ...payload,
+        preflightWakeRequired: true,
+        preflightWakeAttempts: attempt,
+        lastPreflightWakeAt: now(),
+      };
+      task.updatedAt = now();
+      this.db.cloudTasks.set(String(task.id), task);
+      this.db.saveDeferred();
+
+      const wake = await this.runSilentWake([label.id], {
+        apId,
+        waitMs: Math.max(4000, Math.min(20000, Number(process.env.ESL_REFRESH_OFFLINE_WAKE_WAIT_MS ?? 7000))),
+        psmDurationMs: Math.max(5000, Math.min(60000, Number(process.env.ESL_REFRESH_OFFLINE_WAKE_PSM_MS ?? 15000))),
+        sendMqtt: true,
+        sendWs: true,
+        disconnectAfterProbe: true,
+      });
+      const labelWake = Array.isArray(wake.labels) ? wake.labels.find((item) => item.labelId === label.id) : undefined;
+      if (wake.ok || labelWake?.state === 'online') {
+        task.status = 'queued';
+        task.resultMsg = `标签已唤醒连接成功，准备下发刷新。`;
+        task.payload = {
+          ...(task.payload && typeof task.payload === 'object' ? task.payload as Row : {}),
+          preflightWakeRequired: false,
+          preflightWakeSucceededAt: now(),
+        };
+        task.updatedAt = now();
+        this.db.cloudTasks.set(String(task.id), task);
+        this.db.saveDeferred();
+        return { ok: true };
+      }
+
+      if (attempt < maxAttempts) {
+        await wait(Math.max(500, Math.min(5000, Number(process.env.ESL_REFRESH_OFFLINE_WAKE_RETRY_DELAY_MS ?? 1200))));
+      }
+    }
+
+    task.status = 'trigger_pending';
+    task.resultMsg = `刷新前暂未收到标签真实回包，已进入待触发；系统会每 ${Math.round(REFRESH_DEFERRED_RETRY_DELAY_MS / 1000)} 秒重新尝试下发，最多 ${REFRESH_DEFERRED_RETRY_MAX} 次。`;
+    task.payload = {
+      ...(task.payload && typeof task.payload === 'object' ? task.payload as Row : {}),
+      preflightWakeRequired: true,
+      preflightWakePendingAt: now(),
+    };
+    task.updatedAt = now();
+    this.db.cloudTasks.set(String(task.id), task);
+    this.db.saveDeferred();
+    this.scheduleDeferredRefreshRetry(label.id, String(task.id));
+    return { ok: false };
+  }
+
   private async recoverQueuedRefreshTasks() {
-    const recoverableStatuses = new Set(['queued', 'rendering', 'sending', 'timeout']);
+    const recoverableStatuses = new Set(['queued', 'rendering', 'sending', 'timeout', 'trigger_pending']);
     const tasks = [...this.db.cloudTasks.values()]
       .filter((task) => recoverableStatuses.has(String(task.status ?? '')))
       .sort((a, b) => String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')));
@@ -1848,12 +2137,23 @@ export class LocalCloudController {
         continue;
       }
 
-      if (payload.autoRetryExhausted === true) {
+      if (payload.autoRetryExhausted === true || payload.deferredRetryExhausted === true) {
         task.status = 'failed';
-        task.resultMsg = '刷新失败：已多次自动唤醒并重试，仍未收到价签确认。';
+        task.resultMsg = payload.deferredRetryExhausted === true
+          ? `刷新失败：待触发期间已重试 ${numberValue(payload.deferredRetryAttempts, REFRESH_DEFERRED_RETRY_MAX)} 次，仍未收到价签确认。`
+          : '刷新失败：已多次自动唤醒并重试，仍未收到价签确认。';
         task.payload = { ...payload, retryInFlight: false };
         task.updatedAt = now();
         this.db.cloudTasks.set(taskId, task);
+        continue;
+      }
+
+      if (String(task.status ?? '') === 'trigger_pending') {
+        task.resultMsg = '服务重启后已恢复待触发刷新，稍后继续尝试下发';
+        task.updatedAt = now();
+        task.payload = { ...payload, retryInFlight: false };
+        this.db.cloudTasks.set(taskId, task);
+        this.scheduleDeferredRefreshRetry(label.id, taskId, 2_000);
         continue;
       }
 
@@ -1873,6 +2173,77 @@ export class LocalCloudController {
     }
   }
 
+  private startQueuedTaskReconciler() {
+    const enabled = readBool(process.env.ESL_REFRESH_QUEUE_RECONCILER_ENABLED, true);
+    if (!enabled) return;
+    const intervalMs = Math.max(10_000, Math.min(300_000, Number(process.env.ESL_REFRESH_QUEUE_RECONCILE_INTERVAL_MS ?? 30_000)));
+    setInterval(() => {
+      void this.reconcileQueuedRefreshTasks().catch((error) => {
+        this.db.recordRequest({
+          method: 'REFRESH-TASK-RECONCILE',
+          path: '/tasks/reconcile',
+          statusCode: 500,
+          body: { error: error instanceof Error ? error.message : String(error) },
+        });
+      });
+    }, intervalMs);
+  }
+
+  private async reconcileQueuedRefreshTasks() {
+    const staleAfterMs = Math.max(30_000, Math.min(3_600_000, Number(process.env.ESL_REFRESH_QUEUE_STALE_MS ?? 120_000)));
+    const limit = Math.max(1, Math.min(100, Number(process.env.ESL_REFRESH_QUEUE_RECONCILE_LIMIT ?? 50)));
+    const staleTasks = [...this.db.cloudTasks.values()]
+      .filter((task) => {
+        const status = String(task.status ?? '');
+        if (!['queued', 'trigger_pending'].includes(status)) return false;
+        if (task.parentTaskId) return false;
+        return !isWithinMs(task.updatedAt ?? task.createdAt, staleAfterMs);
+      })
+      .sort((a, b) => String(a.updatedAt ?? a.createdAt ?? '').localeCompare(String(b.updatedAt ?? b.createdAt ?? '')))
+      .slice(0, limit);
+
+    let requeuedCount = 0;
+    for (const task of staleTasks) {
+      if (this.supersedeIfStaleRefreshTask(task)) continue;
+      const taskId = String(task.id ?? '');
+      if (!taskId || await this.refreshQueue.hasTask(taskId)) continue;
+      const labelId = String(task.eslDeviceId ?? '');
+      const label = labelId ? this.db.labels.get(labelId) : undefined;
+      if (!label) {
+        task.status = 'failed';
+        task.resultMsg = '队列恢复失败：标签不存在';
+        task.updatedAt = now();
+        this.db.cloudTasks.set(taskId, task);
+        continue;
+      }
+      const apId = this.resolveDeliveryApId(label);
+      if (!apId) {
+        task.status = 'trigger_pending';
+        task.resultMsg = '暂无可用基站，任务保持待触发。';
+        task.updatedAt = now();
+        this.db.cloudTasks.set(taskId, task);
+        continue;
+      }
+      task.status = 'queued';
+      task.apId = apId;
+      task.resultMsg = '检测到任务排队状态丢失，已重新加入刷新队列。';
+      task.updatedAt = now();
+      this.db.cloudTasks.set(taskId, task);
+      await this.enqueueRefreshTask(apId, taskId);
+      requeuedCount += 1;
+    }
+
+    if (staleTasks.length > 0) {
+      this.db.saveDeferred();
+      this.db.recordRequest({
+        method: 'REFRESH-TASK-RECONCILE',
+        path: '/tasks/reconcile',
+        statusCode: 200,
+        body: { checkedCount: staleTasks.length, requeuedCount },
+      });
+    }
+  }
+
   private taskHasSuccessfulRefreshEvent(task: Row) {
     const events = Array.isArray(task.events) ? task.events as Row[] : [];
     return events.some((event) => {
@@ -1888,11 +2259,6 @@ export class LocalCloudController {
           && Number(technical?.tasksCount) === 0
         );
     });
-  }
-
-  private autoRetryAttempts(task: Row) {
-    const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
-    return numberValue(payload.autoRetryAttempts, 0);
   }
 
   private manualRetryCount(task: Row) {
@@ -2015,13 +2381,12 @@ export class LocalCloudController {
     return Boolean(template && stringValue(template.status, 'draft') === 'published');
   }
 
-  private async refreshLinkedProductDevices(productId: string, taskType: string, request?: Request) {
+  private refreshLinkedProductDevices(productId: string, taskType: string, request?: Request) {
     const labels = [...this.db.labels.values()]
       .map((label) => label as Label & Row)
       .filter((label) => String(label.productId ?? '') === productId && this.canAccessRow(label, request));
     const refreshableLabels = labels.filter((label) => this.isRefreshableTemplate(this.resolveEffectiveTemplateForLabel(label, request)));
-    const tasks = await this.createRefreshTasksQueued(refreshableLabels.map((label) => label.id), taskType);
-    const taskIds = tasks.map((task) => String(task.id));
+    const taskIds = this.createRefreshTasksQueuedFast(refreshableLabels.map((label) => label.id), taskType);
     const missingTemplateCount = labels.length - refreshableLabels.length;
     return {
       attempted: true,
@@ -2032,19 +2397,18 @@ export class LocalCloudController {
       taskIds,
       reasonCode: labels.length ? (refreshableLabels.length ? null : 'no_template') : 'no_bound_devices',
       message: taskIds.length
-        ? `商品已更新，已自动创建 ${taskIds.length} 个标签刷新任务`
+        ? `商品已更新，已提交 ${taskIds.length} 个标签刷新任务，后台正在分批处理`
         : labels.length
           ? '商品已更新，但绑定标签没有已发布模板，未自动下发'
           : '商品已更新，但没有绑定标签，未自动下发',
     };
   }
 
-  private async refreshTemplateLinkedDevices(templateId: string, taskType: string, request?: Request) {
+  private refreshTemplateLinkedDevices(templateId: string, taskType: string, request?: Request) {
     const labels = [...this.db.labels.values()]
       .map((label) => label as Label & Row)
       .filter((label) => String(label.templateId ?? '') === templateId && this.canAccessRow(label, request));
-    const tasks = await this.createRefreshTasksQueued(labels.map((label) => label.id), taskType);
-    const taskIds = tasks.map((task) => String(task.id));
+    const taskIds = this.createRefreshTasksQueuedFast(labels.map((label) => label.id), taskType);
     return {
       attempted: true,
       boundDeviceCount: labels.length,
@@ -2057,6 +2421,13 @@ export class LocalCloudController {
         ? `模板已发布，已创建 ${taskIds.length} 个标签刷新任务，后台正在分批下发`
         : '模板已发布，但没有绑定标签，未自动下发',
     };
+  }
+
+  private countTemplateLinkedLabels(templateId: string, request?: Request) {
+    return [...this.db.labels.values()]
+      .map((label) => label as Label & Row)
+      .filter((label) => String(label.templateId ?? '') === templateId && this.canAccessRow(label, request))
+      .length;
   }
 
   private async deliverRefreshTask(label: Label, render: RenderedTemplateImage, taskId: unknown) {
@@ -2160,55 +2531,42 @@ export class LocalCloudController {
     };
   }
 
-  private scheduleRefreshRetry(labelId: string, taskId: string) {
+  private scheduleDeferredRefreshRetry(labelId: string, taskId: string, delayMs = REFRESH_DEFERRED_RETRY_DELAY_MS) {
     const retryEnabled = readBool(process.env.ESL_REFRESH_AUTO_RETRY, true);
     if (!retryEnabled) return;
+    const task = this.db.cloudTasks.get(taskId);
+    if (!task || this.supersedeIfStaleRefreshTask(task)) return;
+    if (this.deferredRefreshTimers.has(taskId)) return;
 
-    const delayMs = Math.max(3000, Math.min(60000, Number(process.env.ESL_REFRESH_RETRY_DELAY_MS ?? 5000)));
-    setTimeout(() => {
-      void this.retryRefreshIfNeeded(labelId, taskId).catch((error) => {
+    const timer = setTimeout(() => {
+      this.deferredRefreshTimers.delete(taskId);
+      void this.requeueDeferredRefreshIfNeeded(labelId, taskId).catch((error) => {
         this.db.recordRequest({
-          method: 'LOCAL-IMAGE-RETRY',
+          method: 'LOCAL-IMAGE-DEFERRED-RETRY',
           path: `/labels/${labelId}`,
           statusCode: 500,
           body: { labelId, taskId, error: error instanceof Error ? error.message : String(error) },
         });
       });
     }, delayMs);
+    this.deferredRefreshTimers.set(taskId, timer);
   }
 
-  private async retryRefreshIfNeeded(labelId: string, taskId: string) {
+  private clearDeferredRefreshTimer(taskId: string) {
+    const timer = this.deferredRefreshTimers.get(taskId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.deferredRefreshTimers.delete(taskId);
+  }
+
+  private async requeueDeferredRefreshIfNeeded(labelId: string, taskId: string) {
     const task = this.db.cloudTasks.get(taskId);
     if (!task || task.parentTaskId) return;
+    if (this.supersedeIfStaleRefreshTask(task)) return;
     const status = String(task.status ?? '');
     if (status === 'success') return;
 
     const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
-    if (payload.retryInFlight === true) {
-      const lockedAtMs = Date.parse(String(payload.lastAutoRetryAt ?? ''));
-      const lockIsFresh = Number.isFinite(lockedAtMs) && Date.now() - lockedAtMs < AUTO_RETRY_LOCK_TTL_MS;
-      if (lockIsFresh) return;
-      task.payload = { ...payload, retryInFlight: false };
-      task.updatedAt = now();
-      this.db.cloudTasks.set(taskId, task);
-      this.db.save();
-    }
-
-    const autoRetryAttempts = this.autoRetryAttempts(task);
-    const maxRetries = Math.max(0, Math.min(5, Number(process.env.ESL_REFRESH_AUTO_RETRY_MAX ?? 3)));
-    if (autoRetryAttempts >= maxRetries) {
-      task.status = 'failed';
-      task.resultMsg = `刷新失败：已自动唤醒并重试 ${maxRetries} 次，仍未收到价签确认。`;
-      task.updatedAt = now();
-      task.payload = { ...payload, retryInFlight: false, autoRetryExhausted: true };
-      this.db.cloudTasks.set(taskId, task);
-      this.db.save();
-      return;
-    }
-
-    const retryableStatuses = new Set(['sending', 'failed', 'timeout']);
-    if (!retryableStatuses.has(status)) return;
-
     const label = this.db.labels.get(labelId);
     if (!label) {
       task.status = 'failed';
@@ -2222,84 +2580,93 @@ export class LocalCloudController {
 
     const apId = this.resolveDeliveryApId(label);
     if (!apId) {
-      task.status = 'failed';
-      task.resultMsg = '刷新失败：没有可用基站，无法重试。';
-      task.updatedAt = now();
+      task.status = 'trigger_pending';
+      task.resultMsg = `没有可用基站，任务保持待触发；系统将在 ${Math.round(REFRESH_DEFERRED_RETRY_DELAY_MS / 1000)} 秒后继续检查。`;
       task.payload = { ...payload, retryInFlight: false };
+      task.updatedAt = now();
       this.db.cloudTasks.set(taskId, task);
-      this.db.save();
+      this.db.saveDeferred();
+      this.scheduleDeferredRefreshRetry(labelId, taskId);
       return;
     }
 
-    const nextAutoRetryAttempt = autoRetryAttempts + 1;
-    task.status = 'sending';
-    task.resultMsg = `正在重新唤醒价签并第 ${nextAutoRetryAttempt} 次自动补发刷新。`;
-    task.updatedAt = now();
-    task.payload = { ...payload, retryInFlight: true, autoRetryAttempts: nextAutoRetryAttempt, lastAutoRetryAt: now() };
-    this.db.cloudTasks.set(taskId, task);
-    this.db.save();
+    const retryableStatuses = new Set(['sending', 'timeout', 'trigger_pending']);
+    if (!retryableStatuses.has(status)) return;
 
-    try {
-      await this.runSilentWake([labelId], {
-        apId,
-        waitMs: Math.max(3000, Math.min(12000, Number(process.env.ESL_REFRESH_RETRY_WAKE_WAIT_MS ?? 4500))),
-        psmDurationMs: Math.max(3000, Math.min(30000, Number(process.env.ESL_REFRESH_RETRY_PSM_DURATION_MS ?? 12000))),
-        sendMqtt: true,
-        sendWs: true,
-        disconnectAfterProbe: true,
-      });
-
-      const freshTask = this.db.cloudTasks.get(taskId);
-      if (!freshTask || String(freshTask.status ?? '') === 'success') {
-        return;
-      }
-
-      const render = await this.renderTemplateForLabel(label);
-      const delivery = await this.deliverRefreshTask(label, render, task.id);
-      freshTask.renderResult = {
-        width: render.width,
-        height: render.height,
-        colorMode: render.colorMode,
-        previewImageUrl: render.previewImageUrl,
-      };
-      freshTask.status = delivery.ok ? 'sending' : 'failed';
-      freshTask.resultMsg = delivery.ok
-        ? `已自动唤醒并第 ${nextAutoRetryAttempt} 次重新下发，正在等待价签确认。`
-        : delivery.reason;
-      freshTask.delivery = {
-        ...(delivery as Row),
-        autoRetryAttempt: nextAutoRetryAttempt,
-      };
-      freshTask.payload = {
-        ...(freshTask.payload && typeof freshTask.payload === 'object' ? freshTask.payload as Row : {}),
-        retryInFlight: false,
-        lastAutoRetryAt: now(),
-      };
-      freshTask.updatedAt = now();
-      if (delivery.commandId) {
-        freshTask.payload = { ...(freshTask.payload as Row), commandId: delivery.commandId };
-      }
-      this.db.cloudTasks.set(taskId, freshTask);
-      this.db.save();
-      if (String(freshTask.status ?? '') !== 'success') {
-        this.scheduleRefreshRetry(labelId, taskId);
-      }
-    } catch (error) {
-      const failedTask = this.db.cloudTasks.get(taskId) ?? task;
-      failedTask.status = 'failed';
-      failedTask.resultMsg = `自动唤醒重试失败：${error instanceof Error ? error.message : String(error)}`;
-      failedTask.payload = {
-        ...(failedTask.payload && typeof failedTask.payload === 'object' ? failedTask.payload as Row : {}),
-        retryInFlight: false,
-        lastAutoRetryAt: now(),
-      };
-      failedTask.updatedAt = now();
-      this.db.cloudTasks.set(taskId, failedTask);
-      this.db.save();
-      if (this.autoRetryAttempts(failedTask) < maxRetries) {
-        this.scheduleRefreshRetry(labelId, taskId);
-      }
+    if (payload.deferredRetryExhausted === true) {
+      task.status = 'failed';
+      task.resultMsg = `刷新失败：待触发期间已重试 ${numberValue(payload.deferredRetryAttempts, REFRESH_DEFERRED_RETRY_MAX)} 次，仍未收到价签确认。`;
+      task.payload = { ...payload, retryInFlight: false };
+      task.updatedAt = now();
+      this.db.cloudTasks.set(taskId, task);
+      this.db.saveDeferred();
+      return;
     }
+
+    const attempts = numberValue(payload.deferredRetryAttempts, 0);
+    if (attempts >= REFRESH_DEFERRED_RETRY_MAX) {
+      task.status = 'failed';
+      task.resultMsg = `刷新失败：待触发期间已间隔重试 ${REFRESH_DEFERRED_RETRY_MAX} 次，仍未收到价签确认。请确认标签在基站范围内且在线后手动重试。`;
+      task.payload = { ...payload, retryInFlight: false, deferredRetryExhausted: true };
+      task.updatedAt = now();
+      this.db.cloudTasks.set(taskId, task);
+      this.db.saveDeferred();
+      return;
+    }
+
+    if (!this.isLabelScannedByAp(label, apId, LABEL_ONLINE_STABLE_MS)) {
+      const nextAttempts = attempts + 1;
+      task.status = 'trigger_pending';
+      task.apId = apId;
+      task.resultMsg = `标签暂未被基站扫描确认，待触发第 ${nextAttempts}/${REFRESH_DEFERRED_RETRY_MAX} 次检查；系统将在 ${Math.round(REFRESH_DEFERRED_RETRY_DELAY_MS / 1000)} 秒后继续尝试。`;
+      task.payload = {
+        ...payload,
+        retryInFlight: false,
+        deferredRetryAttempts: nextAttempts,
+        lastDeferredRetryAt: now(),
+      };
+      task.updatedAt = now();
+      this.db.cloudTasks.set(taskId, task);
+      this.db.saveDeferred();
+      this.scheduleDeferredRefreshRetry(labelId, taskId);
+      return;
+    }
+
+    const nextAttempts = attempts + 1;
+    task.status = 'queued';
+    task.apId = apId;
+    task.resultMsg = `标签已被基站扫描到，待触发第 ${nextAttempts}/${REFRESH_DEFERRED_RETRY_MAX} 次重新下发。`;
+    task.payload = {
+      ...payload,
+      retryInFlight: false,
+      preflightWakeRequired: false,
+      deferredRetryAttempts: nextAttempts,
+      lastDeferredRetryAt: now(),
+    };
+    task.updatedAt = now();
+    this.db.cloudTasks.set(taskId, task);
+    this.db.saveDeferred();
+    await this.enqueueRefreshTask(apId, taskId);
+  }
+
+  private isLabelScannedByAp(label: Label, apId?: string, maxAgeMs = LABEL_OFFLINE_AFTER_MS) {
+    if (!apId) return false;
+    const ap = this.db.baseStations.get(apId);
+    const discoveredLabels = ap?.discoveredLabels && typeof ap.discoveredLabels === 'object'
+      ? ap.discoveredLabels as Record<string, Row>
+      : {};
+    const discovered = discoveredLabels[label.id];
+    const lastSeenAt = stringValue(discovered?.lastSeenAt);
+    return Boolean(discovered) && isWithinMs(lastSeenAt || label.updatedAt, maxAgeMs);
+  }
+
+  private hasRecentVerifiedLabelContact(label: Label, maxAgeMs = LABEL_ONLINE_STABLE_MS, apId = label.apId) {
+    const row = label as Label & Row;
+    const connectivity = row.connectivity && typeof row.connectivity === 'object' ? row.connectivity as Row : {};
+    if (stringValue(connectivity.state) === 'online' && isWithinMs(connectivity.checkedAt, maxAgeMs)) return true;
+    if (label.status === 'online' && isWithinMs(label.updatedAt, maxAgeMs)) return true;
+    if (!label.apId) return false;
+    return this.isLabelScannedByAp(label, apId, maxAgeMs) || this.isLabelScannedByAp(label, label.apId, maxAgeMs);
   }
 
   private startLabelKeepaliveLoops() {
@@ -2307,6 +2674,11 @@ export class LocalCloudController {
     if (!enabled || this.labelKeepaliveTimer) return;
 
     const intervalMs = Math.max(30_000, Math.min(300_000, Number(process.env.ESL_LABEL_KEEPALIVE_INTERVAL_MS ?? 90_000)));
+    setTimeout(() => {
+      for (const ap of this.db.baseStations.values()) {
+        void this.keepaliveLabelsForAp(ap.id).catch(() => undefined);
+      }
+    }, Math.max(5000, Math.min(120_000, Number(process.env.ESL_LABEL_KEEPALIVE_INITIAL_DELAY_MS ?? 20_000))));
     this.labelKeepaliveTimer = setInterval(() => {
       for (const ap of this.db.baseStations.values()) {
         void this.keepaliveLabelsForAp(ap.id).catch((error) => {
@@ -2366,6 +2738,30 @@ export class LocalCloudController {
         body: { apId: ap.id, importedCount, discoveredCount: Object.keys(discoveredLabels).length },
       });
     }
+  }
+
+  private recoverLabelsFromDiscoveredCaches() {
+    let importedCount = 0;
+    for (const ap of this.db.baseStations.values() as Iterable<BaseStation & Row>) {
+      const discoveredLabels = ap.discoveredLabels && typeof ap.discoveredLabels === 'object'
+        ? ap.discoveredLabels as Record<string, Row>
+        : {};
+      if (!Object.keys(discoveredLabels).length) continue;
+      if (!apAutoImportEnabled(ap) && ![...this.db.labels.values()].some((label) => label.apId === ap.id)) {
+        continue;
+      }
+      const before = this.db.labels.size;
+      this.importDiscoveredLabelsForAp(ap);
+      importedCount += this.db.labels.size - before;
+    }
+    if (importedCount <= 0) return;
+    this.db.save();
+    this.db.recordRequest({
+      method: 'AP-DISCOVERED-RECOVERY',
+      path: '/aps/discovered-labels/recover',
+      statusCode: 200,
+      body: { importedCount },
+    });
   }
 
   private recoverDiscoveredLabelsFromRequestLogs() {
@@ -2526,21 +2922,58 @@ export class LocalCloudController {
   private async keepaliveLabelsForAp(apId: string) {
     const ap = this.db.baseStations.get(apId);
     if (!ap || ap.status !== 'online' || !this.apWebsocket.getConnectionStatus(apId).connected) return;
+    if (this.labelKeepaliveInFlightByAp.has(apId)) return;
+    if (await this.refreshQueue.isApBusy(apId)) return;
 
-    const limit = Math.max(1, Math.min(30, Number(process.env.ESL_LABEL_KEEPALIVE_BATCH_SIZE ?? 10)));
-    const labels = [...this.db.labels.values()]
-      .filter((label) => label.apId === apId)
-      .slice(0, limit);
+    const labels = this.nextKeepaliveLabelsForAp(apId);
     if (!labels.length) return;
 
-    await this.runSilentWake(labels.map((label) => label.id), {
-      apId,
-      waitMs: Math.max(3000, Math.min(15000, Number(process.env.ESL_LABEL_KEEPALIVE_WAIT_MS ?? 5000))),
-      psmDurationMs: Math.max(3000, Math.min(30000, Number(process.env.ESL_LABEL_KEEPALIVE_PSM_DURATION_MS ?? 12000))),
-      sendMqtt: true,
-      sendWs: true,
-      disconnectAfterProbe: true,
-    });
+    this.labelKeepaliveInFlightByAp.add(apId);
+    try {
+      await this.runSilentWake(labels.map((label) => label.id), {
+        apId,
+        waitMs: Math.max(3000, Math.min(15000, Number(process.env.ESL_LABEL_KEEPALIVE_WAIT_MS ?? 5000))),
+        psmDurationMs: Math.max(3000, Math.min(30000, Number(process.env.ESL_LABEL_KEEPALIVE_PSM_DURATION_MS ?? 12000))),
+        sendMqtt: true,
+        sendWs: true,
+        disconnectAfterProbe: true,
+      });
+    } finally {
+      this.labelKeepaliveInFlightByAp.delete(apId);
+    }
+  }
+
+  private nextKeepaliveLabelsForAp(apId: string) {
+    const limit = Math.max(1, Math.min(30, Number(process.env.ESL_LABEL_KEEPALIVE_BATCH_SIZE ?? 10)));
+    const allLabels = [...this.db.labels.values()]
+      .filter((label) => label.apId === apId)
+      .sort((left, right) => this.labelProbePriority(left) - this.labelProbePriority(right));
+    const candidates = allLabels.filter((label) => this.shouldProbeLabel(label));
+    if (!candidates.length) return [];
+    const start = this.labelKeepaliveCursorByAp.get(apId) ?? 0;
+    const labels = candidates.slice(start, start + limit);
+    this.labelKeepaliveCursorByAp.set(apId, start + limit >= candidates.length ? 0 : start + limit);
+    return labels.length ? labels : candidates.slice(0, limit);
+  }
+
+  private labelProbePriority(label: Label) {
+    const row = label as Label & Row;
+    const connectivity = row.connectivity && typeof row.connectivity === 'object' ? row.connectivity as Row : {};
+    if (label.status !== 'online') return 0;
+    const checkedAt = stringValue(connectivity.checkedAt, label.updatedAt);
+    return new Date(checkedAt || 0).getTime() || 0;
+  }
+
+  private shouldProbeLabel(label: Label) {
+    const row = label as Label & Row;
+    const connectivity = row.connectivity && typeof row.connectivity === 'object' ? row.connectivity as Row : {};
+    const state = stringValue(connectivity.state);
+    const checkedAt = stringValue(connectivity.checkedAt, label.updatedAt);
+    const nextProbeAt = stringValue(connectivity.nextProbeAt);
+    if (nextProbeAt && new Date(nextProbeAt).getTime() > Date.now()) return false;
+    if (label.status !== 'online') return true;
+    if (state && state !== 'online') return true;
+    return !isWithinMs(checkedAt, LABEL_ONLINE_STABLE_MS);
   }
 
   private async runSilentWake(
@@ -2770,18 +3203,63 @@ export class LocalCloudController {
     const current = this.db.labels.get(labelId);
     if (!current) return;
     const row = current as Label & Row;
-    row.status = result.state === 'online' ? 'online' : result.state === 'waking' ? current.status : 'offline';
+    const previousConnectivity = row.connectivity && typeof row.connectivity === 'object' ? row.connectivity as Row : {};
+    const previousFailures = numberValue(previousConnectivity.offlineProbeFailures, 0);
+    const nextFailures = result.state === 'online' ? 0 : previousFailures + 1;
+    const offlineConfirmed = result.state !== 'online' && nextFailures >= LABEL_OFFLINE_PROBE_MAX;
+    row.status = result.state === 'online' ? 'online' : offlineConfirmed ? 'offline' : current.status;
     row.connectivity = {
       mode: 'silent_wake',
-      state: result.state,
+      state: result.state === 'online' ? 'online' : offlineConfirmed ? 'offline' : 'waking',
       checkedAt: now(),
       detail: `无感唤醒：${result.detail}`,
       trackingId: result.trackingId,
+      offlineProbeFailures: nextFailures,
+      nextProbeAt: result.state === 'online'
+        ? new Date(Date.now() + LABEL_ONLINE_STABLE_MS).toISOString()
+        : new Date(Date.now() + (offlineConfirmed ? LABEL_ONLINE_STABLE_MS : LABEL_OFFLINE_PROBE_RETRY_DELAY_MS)).toISOString(),
     };
     if (result.state === 'online') {
       row.updatedAt = now();
     }
     this.db.labels.set(labelId, row);
+    if (result.state !== 'online' && !offlineConfirmed) {
+      this.scheduleLabelOfflineProbe(labelId);
+    }
+  }
+
+  private scheduleLabelOfflineProbe(labelId: string) {
+    if (this.labelOfflineProbeTimers.has(labelId)) return;
+    const timer = setTimeout(() => {
+      this.labelOfflineProbeTimers.delete(labelId);
+      void this.retryOfflineLabelProbe(labelId).catch((error) => {
+        this.db.recordRequest({
+          method: 'LABEL-OFFLINE-PROBE',
+          path: `/labels/${labelId}`,
+          statusCode: 500,
+          body: { labelId, error: error instanceof Error ? error.message : String(error) },
+        });
+      });
+    }, LABEL_OFFLINE_PROBE_RETRY_DELAY_MS);
+    this.labelOfflineProbeTimers.set(labelId, timer);
+  }
+
+  private async retryOfflineLabelProbe(labelId: string) {
+    const label = this.db.labels.get(labelId);
+    if (!label?.apId) return;
+    if (this.hasRecentVerifiedLabelContact(label)) return;
+    if (await this.refreshQueue.isApBusy(label.apId)) {
+      this.scheduleLabelOfflineProbe(labelId);
+      return;
+    }
+    await this.runSilentWake([labelId], {
+      apId: label.apId,
+      waitMs: Math.max(3000, Math.min(15000, Number(process.env.ESL_LABEL_KEEPALIVE_WAIT_MS ?? 5000))),
+      psmDurationMs: Math.max(3000, Math.min(30000, Number(process.env.ESL_LABEL_KEEPALIVE_PSM_DURATION_MS ?? 12000))),
+      sendMqtt: true,
+      sendWs: true,
+      disconnectAfterProbe: true,
+    });
   }
 
   private async buildLocalReadWritePacket(storeCode: string, apId: string, labelId: string, render: RenderedTemplateImage): Promise<LocalImagePacket> {
@@ -2885,30 +3363,30 @@ export class LocalCloudController {
     const customFields = source.customFields && typeof source.customFields === 'object' ? source.customFields as Row : {};
     const price = numberValue(source.price, label.price);
     return {
-      sourceId: stringValue(source.sourceId, stringValue(source.sku, label.sku ?? label.id)),
+      sourceId: bindingTextValue(source.sourceId, bindingTextValue(source.sku, label.sku ?? label.id)),
       id: label.id,
       eslCode: label.id,
-      sku: stringValue(source.sku, label.sku ?? label.id),
-      reference: stringValue(source.reference, stringValue(source.barcode, label.sku ?? label.id)),
-      barcode: stringValue(source.barcode, label.sku ?? label.id),
-      name: stringValue(source.name, label.title),
-      title: stringValue(source.name, label.title),
-      subName: stringValue(source.subName),
-      brand: stringValue(source.brand),
-      category: stringValue(source.category),
+      sku: bindingTextValue(source.sku, label.sku ?? label.id),
+      reference: bindingTextValue(source.reference, bindingTextValue(source.barcode, label.sku ?? label.id)),
+      barcode: bindingTextValue(source.barcode, label.sku ?? label.id),
+      name: bindingTextValue(source.name, label.title),
+      title: bindingTextValue(source.name, label.title),
+      subName: bindingTextValue(source.subName),
+      brand: bindingTextValue(source.brand),
+      category: bindingTextValue(source.category),
       price: price.toFixed(2),
       field1: price.toFixed(2),
       originalPrice: numberValue(source.originalPrice, price).toFixed(2),
       memberPrice: numberValue(source.memberPrice, price).toFixed(2),
       promotionPrice: numberValue(source.promotionPrice, price).toFixed(2),
       field2: numberValue(source.promotionPrice, price).toFixed(2),
-      promotionText: stringValue(source.promotionText),
-      unit: stringValue(source.unit),
-      specification: stringValue(source.specification),
-      imageUrl: stringValue(source.imageUrl),
+      promotionText: bindingTextValue(source.promotionText),
+      unit: bindingTextValue(source.unit),
+      specification: bindingTextValue(source.specification),
+      imageUrl: bindingTextValue(source.imageUrl),
       ...Object.fromEntries(Array.from({ length: 22 }, (_, index) => {
         const key = `customField${index + 1}`;
-        return [key, stringValue(source[key], stringValue(customFields[key]))];
+        return [key, bindingTextValue(source[key], bindingTextValue(customFields[key]))];
       })),
     };
   }
@@ -3175,7 +3653,10 @@ export class LocalCloudController {
     const textAlign = String(style.textAlign ?? 'left');
     const textAnchor = textAlign === 'center' ? 'middle' : textAlign === 'right' ? 'end' : 'start';
     const paddingX = 4;
-    const text = type === 'price' ? `￥${boundText || '19.90'}` : (boundText || stringValue(item.expression, String(item.bindingField ?? type)));
+    const fallbackText = stringValue(item.expression, bindingField ? '' : String(item.bindingField ?? type));
+    const text = type === 'price'
+      ? (bindingField && !boundText ? '' : `￥${boundText || fallbackText || '19.90'}`)
+      : (boundText || fallbackText);
     const autoSize = boolValue(style.autoSize);
     const measured = autoSize ? measureSvgTextBox(text, fontSize, fontWeight) : null;
     const boxWidth = measured?.width ?? width;
@@ -3313,11 +3794,17 @@ export class LocalCloudController {
   }
 
   private isAdminUser(user: Row) {
-    return normalizeRole(user.role) === 'ADMIN';
+    return isAdminRoleValue(user.role);
   }
 
   private rowOwnerId(row?: Row) {
     return String(row?.ownerUserId ?? '');
+  }
+
+  private canAdminAccessOwner(currentUser: Row, ownerUserId: string) {
+    if (!ownerUserId || ownerUserId === String(currentUser.id ?? '')) return true;
+    const owner = this.db.users.get(ownerUserId);
+    return !owner || !isAdminRoleValue(owner.role);
   }
 
   private canAccessRow(row: Row | undefined, request?: Request) {
@@ -3326,7 +3813,9 @@ export class LocalCloudController {
     if (!this.rowOwnerId(row)) {
       this.ensureOwnershipBackfill();
     }
-    return this.isAdminUser(user) || this.rowOwnerId(row) === String(user.id ?? '');
+    const ownerUserId = this.rowOwnerId(row);
+    if (this.isAdminUser(user)) return this.canAdminAccessOwner(user, ownerUserId);
+    return ownerUserId === String(user.id ?? '');
   }
 
   private assertRowVisible<T extends Row>(row: T | undefined, request?: Request, message = 'Resource not found'): T {
@@ -3338,7 +3827,9 @@ export class LocalCloudController {
 
   private visibleRows<T extends Row>(rows: T[], request?: Request) {
     const user = this.currentUser(request);
-    if (this.isAdminUser(user)) return rows;
+    if (this.isAdminUser(user)) {
+      return rows.filter((row) => this.canAdminAccessOwner(user, String(row.ownerUserId ?? '')));
+    }
     const userId = String(user.id ?? '');
     return rows.filter((row) => String(row.ownerUserId ?? '') === userId);
   }
@@ -3453,24 +3944,7 @@ export class LocalCloudController {
   }
 
   private localProducts(request?: Request): Row[] {
-    const products = this.visibleRows([...this.db.cloudProducts.values()], request);
-    for (const label of this.db.labels.values()) {
-      const row = label as Label & Row;
-      if (!this.canAccessRow(row, request)) continue;
-      if (row.productId && products.some((item) => item.id === row.productId)) continue;
-      products.push({
-        id: row.productId ?? `product_${label.id}`,
-        sku: label.sku ?? label.id,
-        barcode: label.sku ?? label.id,
-        name: label.title,
-        price: label.price,
-        status: 'active',
-        ownerUserId: row.ownerUserId,
-        createdAt: label.updatedAt,
-        updatedAt: label.updatedAt,
-      });
-    }
-    return products.map((product) => ({
+    return this.visibleRows([...this.db.cloudProducts.values()], request).map((product) => ({
       ...product,
       owner: this.ownerSummary(product.ownerUserId),
       defaultTemplate: product.defaultTemplateId ? this.db.cloudTemplates.get(String(product.defaultTemplateId)) ?? null : null,
@@ -3655,6 +4129,8 @@ export class LocalCloudController {
     const storeCode = stringValue(query.storeCode);
     const apId = stringValue(query.apId);
     const ownerUserId = stringValue(query.ownerUserId);
+    const productId = stringValue(query.productId);
+    const templateId = stringValue(query.templateId);
     const keyword = stringValue(query.keyword).toLowerCase();
     return labels.filter((label) => {
       const ap = label.apId ? this.findAp(String(label.apId), false) : undefined;
@@ -3662,6 +4138,8 @@ export class LocalCloudController {
       if (ownerUserId && String(label.ownerUserId ?? '') !== ownerUserId) return false;
       if (storeCode && label.storeCode !== storeCode && ap?.storeCode !== storeCode) return false;
       if (apId && label.apId !== apId) return false;
+      if (productId && String(label.productId ?? '') !== productId) return false;
+      if (templateId && String(label.templateId ?? '') !== templateId) return false;
       if (!keyword) return true;
       const haystack = [
         label.id,
@@ -3716,8 +4194,7 @@ export class LocalCloudController {
       : null;
     const ap = label.apId ? this.findAp(String(label.apId), false) : undefined;
     const preset = this.resolveDevicePreset(stringValue(label.deviceType), template, label.id);
-    const activeRecently = isRecentActivity(label.updatedAt);
-    const status = activeRecently && label.status !== 'idle' ? label.status : 'offline';
+    const status = this.effectiveLabelStatus(label);
     return {
       id: label.id,
       eslCode: label.id,
@@ -3780,7 +4257,7 @@ export class LocalCloudController {
         width: renderResult.width,
         height: renderResult.height,
         colorMode: renderResult.colorMode,
-        previewImageUrl: renderResult.previewImageUrl,
+        previewImageUrl: includeDetail ? renderResult.previewImageUrl : undefined,
       },
       retryCount: this.manualRetryCount(task),
       status: task.status,
@@ -3790,7 +4267,7 @@ export class LocalCloudController {
       updatedAt: task.updatedAt,
       userMessage: this.taskUserMessage(task),
       resultMsg: task.resultMsg,
-      delivery: {
+      delivery: includeDetail ? {
         ok: delivery.ok,
         reason: delivery.reason,
         commandId: delivery.commandId,
@@ -3811,7 +4288,7 @@ export class LocalCloudController {
           queueId: downlinkTrace.queueId,
           error: downlinkTrace.error,
         } : undefined,
-      },
+      } : undefined,
     };
     if (!includeDetail) {
       return base;
@@ -3833,6 +4310,29 @@ export class LocalCloudController {
     };
   }
 
+  private localTaskListItem(task: Row) {
+    const eslDevice = task.eslDevice && typeof task.eslDevice === 'object' ? task.eslDevice as Row : undefined;
+    const product = task.productId ? this.db.cloudProducts.get(String(task.productId)) : undefined;
+    const ap = task.apId ? this.db.baseStations.get(String(task.apId)) : undefined;
+    return {
+      ...this.localTask(task, false),
+      payload: undefined,
+      delivery: undefined,
+      renderResult: undefined,
+      eslDevice: eslDevice ? {
+        id: eslDevice.id,
+        eslCode: eslDevice.eslCode,
+        name: eslDevice.name,
+        apId: eslDevice.apId,
+        productId: eslDevice.productId,
+        templateId: eslDevice.templateId,
+        status: eslDevice.status,
+      } : task.eslDeviceId ? { id: task.eslDeviceId, eslCode: task.eslDeviceId } : undefined,
+      product: product ? { id: product.id, name: product.name, sku: product.sku } : undefined,
+      ap: ap ? this.localApSummary(ap) : undefined,
+    };
+  }
+
   private taskUserMessage(task: Row) {
     const status = stringValue(task.status).toLowerCase();
     const taskType = stringValue(task.taskType);
@@ -3847,6 +4347,7 @@ export class LocalCloudController {
       return '任务已取消。';
     }
     if (status === 'queued') return '任务已提交，正在排队。';
+    if (status === 'trigger_pending') return '标签未确认真实在线，待触发重试中。';
     if (status === 'rendering') return '正在生成价签画面。';
     if (status === 'sending') {
       if (taskType === 'auto_retry_after_wake') return '正在补发刷新，请稍等。';
@@ -3878,8 +4379,7 @@ export class LocalCloudController {
       : null;
     const ap = includeAp && label.apId ? this.findAp(label.apId, false) : undefined;
     const preset = this.resolveDevicePreset(stringValue(row.deviceType), template, label.id);
-    const activeRecently = isRecentActivity(label.updatedAt);
-    const status = activeRecently && label.status !== 'idle' ? label.status : 'offline';
+    const status = this.effectiveLabelStatus(label);
     return {
       id: label.id,
       eslCode: label.id,
@@ -3907,6 +4407,34 @@ export class LocalCloudController {
         ? (compactAp ? this.localApSummary(ap) : this.localAp(ap, request))
         : null,
     };
+  }
+
+  private effectiveLabelStatus(label: Label): Label['status'] {
+    if (label.status === 'idle') return 'idle';
+    if (label.status === 'updating') return 'updating';
+    if (label.status === 'failed') return 'failed';
+    const ap = label.apId ? this.db.baseStations.get(String(label.apId)) : undefined;
+    const apOnline = Boolean(ap && ap.status === 'online' && isRecentActivity(ap.lastSeenAt));
+    if (!apOnline) {
+      return isWithinMs(label.updatedAt, LABEL_OFFLINE_AFTER_MS) && label.status === 'online' ? 'online' : 'offline';
+    }
+    const row = label as Label & Row;
+    const connectivity = row.connectivity && typeof row.connectivity === 'object' ? row.connectivity as Row : {};
+    if (label.status === 'online' && stringValue(connectivity.state) === 'online' && isWithinMs(connectivity.checkedAt, LABEL_ONLINE_STABLE_MS)) {
+      return 'online';
+    }
+    const apOnlineAt = ap && typeof ap.onlineAt === 'string'
+      ? stringValue(ap.onlineAt)
+      : stringValue(ap?.lastSeenAt);
+    const apJustOnline = apOnlineAt ? isWithinMs(apOnlineAt, AP_ONLINE_LABEL_TRUST_DELAY_MS) : false;
+    const scanned = this.isLabelScannedByAp(label, label.apId, LABEL_ONLINE_STABLE_MS);
+    if (label.status === 'offline') {
+      return scanned ? 'online' : 'offline';
+    }
+    if (apJustOnline && !scanned && !this.hasRecentVerifiedLabelContact(label, LABEL_ONLINE_STABLE_MS)) {
+      return 'offline';
+    }
+    return this.hasRecentVerifiedLabelContact(label, LABEL_ONLINE_STABLE_MS) ? 'online' : 'offline';
   }
 
   private localApSummary(ap: BaseStation) {
@@ -4139,7 +4667,7 @@ export class LocalCloudController {
   }
 
   private findProduct(productId: string): Row {
-    const product = this.localProducts().find((item) => item.id === productId);
+    const product = this.db.cloudProducts.get(productId);
     if (!product) throw new NotFoundException('Product not found');
     return product;
   }

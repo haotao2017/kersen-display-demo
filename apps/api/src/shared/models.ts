@@ -40,6 +40,7 @@ export interface BaseStation {
     services?: Record<string, unknown>;
   }>;
   status: BaseStationStatus;
+  onlineAt?: string;
   lastSeenAt?: string;
   metrics: {
     rssi?: number;
@@ -61,6 +62,7 @@ export interface Label {
   battery?: number;
   rssi?: number;
   services?: Record<string, unknown>;
+  connectivity?: Record<string, unknown>;
   updatedAt: string;
 }
 

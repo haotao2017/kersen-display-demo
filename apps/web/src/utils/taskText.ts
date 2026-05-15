@@ -4,6 +4,7 @@ export const normalizeTaskStatus = (value: unknown) => String(value ?? '').trim(
 
 export const buildTaskStatusLabels = (tx: Tx): Record<string, string> => ({
   queued: tx('排队中', 'Queued'),
+  trigger_pending: tx('待触发', 'Waiting Wake'),
   rendering: tx('处理中', 'Rendering'),
   ready: tx('已准备好', 'Ready'),
   sending: tx('发送中', 'Sending'),
@@ -59,6 +60,7 @@ export const getTaskUserText = (task: any, tx: Tx) => {
   }
   if (status === 'superseded') return tx('已有新的刷新任务，这条任务已合并。', 'A newer refresh task replaced this one.');
   if (status === 'queued') return tx('任务已提交，正在排队。', 'Task submitted and waiting in queue.');
+  if (status === 'trigger_pending') return tx('待触发：等待标签真实回包，系统会间隔重试。', 'Waiting trigger: waiting for a real node reply; the system will retry periodically.');
   if (status === 'rendering') return tx('正在生成价签画面。', 'Generating the label image.');
   if (status === 'sending' || status === 'sent' || status === 'ap_reply_seen' || status === 'socket_write_ok') {
     if (raw.includes('自动唤醒') || raw.includes('重新唤醒') || raw.includes('重新下发')) {
@@ -84,6 +86,7 @@ export const getTaskSummary = (detail: any, tx: Tx) => {
   const status = normalizeTaskStatus(detail?.status);
   if (!detail) return tx('正在加载任务详情...', 'Loading task details...');
   if (status === 'queued') return tx('任务已经提交，正在排队处理中。', 'The task has been submitted and is waiting in queue.');
+  if (status === 'trigger_pending') return tx('标签未确认真实在线，系统会间隔尝试唤醒/下发，收到确认后自动完成。', 'The display node is not verified online. The system will wake/send periodically and finish after confirmation.');
   if (status === 'rendering') return tx('系统正在生成要显示的内容。', 'The system is generating content for display.');
   if (status === 'sending' || status === 'sent') {
     const raw = String(detail?.resultMsg ?? '');

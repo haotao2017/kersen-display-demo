@@ -7,7 +7,8 @@ export type RefreshJobPayload = {
   apId: string;
 };
 
-type Handler = (payload: RefreshJobPayload) => Promise<void>;
+type HandlerResult = { holdSlot?: boolean } | void;
+type Handler = (payload: RefreshJobPayload) => Promise<HandlerResult>;
 
 @Injectable()
 export class RefreshQueueService implements OnModuleDestroy {
@@ -65,15 +66,18 @@ export class RefreshQueueService implements OnModuleDestroy {
     this.handler = handler;
     if (!this.queue || !this.connection || this.worker) return;
 
-    const concurrency = Math.max(1, Math.min(20, Number(process.env.ESL_REFRESH_WORKER_CONCURRENCY ?? 12)));
+    const concurrency = Math.max(1, Math.min(24, Number(process.env.ESL_REFRESH_WORKER_CONCURRENCY ?? 12)));
     this.worker = new Worker<RefreshJobPayload>(
       'esl-refresh',
       async (job) => {
         await this.waitForApSlot(job.data.apId, job.data.taskId);
+        let result: HandlerResult;
+        let shouldHold = true;
         try {
-          await handler(job.data);
+          result = await handler(job.data);
+          shouldHold = result?.holdSlot !== false;
         } finally {
-          this.releaseApSlot(job.data.apId, job.data.taskId);
+          this.releaseApSlot(job.data.apId, job.data.taskId, shouldHold);
         }
       },
       { connection: this.connection, concurrency },
@@ -89,11 +93,38 @@ export class RefreshQueueService implements OnModuleDestroy {
       await this.queue.add(
         `refresh:${payload.taskId}`,
         payload,
-        { jobId: payload.taskId },
+        { jobId: `${payload.taskId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}` },
       );
       return;
     }
     this.addLocal(payload);
+  }
+
+  async hasTask(taskId: string) {
+    if (!taskId) return false;
+    if (this.queue) {
+      const jobs = await this.queue.getJobs(['active', 'waiting', 'delayed', 'prioritized'], 0, 5000);
+      return jobs.some((job) => job.data.taskId === taskId);
+    }
+    if (this.localTaskIds.has(taskId)) return true;
+    for (const state of this.localQueues.values()) {
+      if (state.pending.some((item) => item.taskId === taskId)) return true;
+    }
+    return false;
+  }
+
+  async isApBusy(apId: string) {
+    if (!apId) return false;
+    if (this.connection) {
+      const active = await this.connection.scard(`esl:ap:${apId}:active-refresh`);
+      if (active > 0) return true;
+    }
+    if (this.queue) {
+      const jobs = await this.queue.getJobs(['active', 'waiting', 'delayed', 'prioritized'], 0, 200);
+      return jobs.some((job) => job.data.apId === apId);
+    }
+    const state = this.localQueues.get(apId);
+    return Boolean(state && (state.active > 0 || state.pending.length > 0));
   }
 
   private addLocal(payload: RefreshJobPayload) {
@@ -116,8 +147,11 @@ export class RefreshQueueService implements OnModuleDestroy {
       if (!payload) continue;
       state.active += 1;
       this.localTaskIds.delete(payload.taskId);
-      void this.handler(payload).finally(async () => {
-        await this.holdApSlot();
+      void this.handler(payload).then(async (result) => {
+        if (result?.holdSlot !== false) {
+          await this.holdApSlot();
+        }
+      }, () => this.holdApSlot()).finally(() => {
         const latest = this.localQueues.get(apId);
         if (latest) {
           latest.active = Math.max(0, latest.active - 1);
@@ -160,15 +194,15 @@ return 0
     }
   }
 
-  private releaseApSlot(apId: string, taskId: string) {
+  private releaseApSlot(apId: string, taskId: string, hold = true) {
     if (!this.connection || !apId || !taskId) return;
-    void this.holdApSlot()
+    void (hold ? this.holdApSlot() : Promise.resolve())
       .then(() => this.connection?.srem(`esl:ap:${apId}:active-refresh`, taskId))
       .catch(() => undefined);
   }
 
   private async holdApSlot() {
-    const holdMs = Math.max(0, Math.min(120_000, Number(process.env.ESL_AP_REFRESH_SLOT_HOLD_MS ?? 30_000)));
+    const holdMs = Math.max(0, Math.min(120_000, Number(process.env.ESL_AP_REFRESH_SLOT_HOLD_MS ?? 5_000)));
     if (holdMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, holdMs));
     }

@@ -1,6 +1,7 @@
 import { ArrowLeftOutlined, EyeOutlined } from '@ant-design/icons';
 import { Button, Card, Descriptions, Empty, Space, Statistic, Table, Tag, Typography } from 'antd';
 import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
 import dayjs from 'dayjs';
 import { Link, Navigate, useParams } from 'react-router-dom';
 import { api } from '../../api';
@@ -23,8 +24,14 @@ export const UserListPage = () => {
   const { tx } = useI18n();
   const currentUser = useAppStore((state) => state.user);
   const isAdmin = currentUser?.role === 'ADMIN';
-  const { data, isPending } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
-  const users = (data ?? []).filter((user) => user.role !== 'ADMIN');
+  const [pagination, setPagination] = useState({ current: 1, pageSize: 50 });
+  const { data, isPending } = useQuery({
+    queryKey: [...queryKeys.users, pagination],
+    queryFn: () => api.users({ page: pagination.current, pageSize: pagination.pageSize }),
+    enabled: isAdmin,
+    placeholderData: (previous) => previous,
+  });
+  const users = (data?.items ?? []).filter((user) => user.role !== 'ADMIN');
 
   if (!isAdmin) return <Navigate to="/dashboard" replace />;
 
@@ -38,6 +45,17 @@ export const UserListPage = () => {
           rowKey="id"
           loading={isPending}
           dataSource={users}
+          pagination={{
+            current: data?.page ?? pagination.current,
+            pageSize: data?.pageSize ?? pagination.pageSize,
+            total: data?.total ?? 0,
+            showSizeChanger: true,
+            pageSizeOptions: [20, 50, 100, 200],
+          }}
+          onChange={(next) => setPagination({
+            current: next.current ?? 1,
+            pageSize: next.pageSize ?? 50,
+          })}
           locale={{ emptyText: <Empty description={tx('暂无非管理员账号', 'No non-admin users yet')} /> }}
           columns={[
             { title: tx('用户名', 'Username'), dataIndex: 'username' },

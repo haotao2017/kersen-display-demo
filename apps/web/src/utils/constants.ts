@@ -7,6 +7,7 @@ export const queryKeys = {
   stores: ['stores'],
   products: ['products'],
   product: (id: string) => ['product', id],
+  productDevices: (id: string) => ['product-devices', id],
   templates: ['templates'],
   template: (id: string) => ['template', id],
   templateSchema: (id: string) => ['template-schema', id],

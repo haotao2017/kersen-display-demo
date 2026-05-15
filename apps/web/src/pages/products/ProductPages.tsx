@@ -82,8 +82,8 @@ export const ProductListPage = () => {
   const isAdmin = currentUser?.role === 'ADMIN';
   const [filters, setFilters] = useState<{ ownerUserId?: string; keyword?: string }>({});
   const { data, isPending } = useQuery({ queryKey: [...queryKeys.products, filters], queryFn: () => api.products(filters) });
-  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
-  const userOptions = useMemo(() => (users ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: () => api.users({ pageSize: 200 }), enabled: isAdmin });
+  const userOptions = useMemo(() => (users?.items ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
   const refresh = useMutation({
     mutationFn: api.refreshProduct,
     onSuccess: (result: ProductRefreshResult) => {
@@ -200,8 +200,14 @@ export const ProductFormPage = () => {
   const isEdit = Boolean(id);
   const [visibleFieldKeys, setVisibleFieldKeys] = useState<string[]>(DEFAULT_CREATE_VISIBLE_FIELDS);
   const { data: detail, isPending: isDetailPending } = useQuery({ queryKey: id ? queryKeys.product(id) : ['product-create'], queryFn: () => api.product(id!), enabled: isEdit });
+  const [boundPagination, setBoundPagination] = useState({ current: 1, pageSize: 50 });
+  const { data: boundDevices, isPending: isBoundDevicesPending } = useQuery({
+    queryKey: id ? [...queryKeys.productDevices(id), boundPagination] : ['product-devices-empty'],
+    queryFn: () => api.productDevices(id!, { page: boundPagination.current, pageSize: boundPagination.pageSize }),
+    enabled: isEdit,
+  });
   const { data: templates } = useQuery({ queryKey: queryKeys.templates, queryFn: () => api.templates({}) });
-  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin && !isEdit });
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: () => api.users({ pageSize: 200 }), enabled: isAdmin && !isEdit });
   const mutation = useMutation({
     mutationFn: (values: any) => (isEdit ? api.updateProduct(id!, values) : api.createProduct(values)),
     onSuccess: (result: ProductUpdateResult | any) => {
@@ -248,7 +254,7 @@ export const ProductFormPage = () => {
     [templates],
   );
   const userOptions = useMemo(
-    () => (users ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })),
+    () => (users?.items ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })),
     [users],
   );
 
@@ -383,8 +389,23 @@ export const ProductFormPage = () => {
         </Form>
       </Card>
       {isEdit ? (
-        <Card title={tx('绑定节点', 'Bound Nodes')}>
-          <Table rowKey="id" loading={isDetailPending} dataSource={detail?.boundDevices ?? []} columns={[{ title: tx('节点编号', 'Node Code'), dataIndex: 'eslCode' }, { title: tx('状态', 'Status'), dataIndex: 'status' }]} pagination={false} />
+        <Card title={`${tx('绑定节点', 'Bound Nodes')} · ${detail?.bindDeviceCount ?? boundDevices?.total ?? 0}`}>
+          <Table
+            rowKey="id"
+            loading={isBoundDevicesPending}
+            dataSource={boundDevices?.items ?? detail?.boundDevices ?? []}
+            columns={[{ title: tx('节点编号', 'Node Code'), dataIndex: 'eslCode' }, { title: tx('状态', 'Status'), dataIndex: 'status' }]}
+            pagination={{
+              current: boundPagination.current,
+              pageSize: boundPagination.pageSize,
+              total: boundDevices?.total ?? detail?.bindDeviceCount ?? 0,
+              showSizeChanger: true,
+            }}
+            onChange={(pagination) => setBoundPagination({
+              current: pagination.current ?? 1,
+              pageSize: pagination.pageSize ?? 50,
+            })}
+          />
         </Card>
       ) : null}
     </Space>

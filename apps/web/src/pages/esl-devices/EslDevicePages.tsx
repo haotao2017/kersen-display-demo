@@ -40,7 +40,7 @@ export const EslDeviceListPage = () => {
   const { data: templates } = useQuery({ queryKey: [...queryKeys.templates, 'options'], queryFn: () => api.templates({ pageSize: 200 }) });
   const { data: aps } = useQuery({ queryKey: [...queryKeys.aps, 'options'], queryFn: () => api.aps({ pageSize: 200 }), refetchInterval: 30_000 });
   const { data: stores } = useQuery({ queryKey: [...queryKeys.stores, 'options'], queryFn: () => api.stores({ pageSize: 200 }), refetchInterval: 60_000 });
-  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: () => api.users({ pageSize: 200 }), enabled: isAdmin });
   const create = useMutation({
     mutationFn: api.createDevice,
     onSuccess: () => {
@@ -145,7 +145,7 @@ export const EslDeviceListPage = () => {
   const productOptions = useMemo(() => (products?.items ?? []).map((item: any) => ({ label: item.name, value: item.id })), [products]);
   const templateOptions = useMemo(() => (templates?.items ?? []).map((item: any) => ({ label: item.name, value: item.id })), [templates]);
   const storeOptions = useMemo(() => (stores?.items ?? []).map((item: any) => ({ label: `${item.name} / ${item.code}`, value: item.code })), [stores]);
-  const userOptions = useMemo(() => (users ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
+  const userOptions = useMemo(() => (users?.items ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
   const apOptions = useMemo(() => (aps?.items ?? [])
     .filter((item: any) => !filters.storeCode || item.storeCode === filters.storeCode)
     .map((item: any) => ({ label: `${item.storeName ?? item.storeCode} / ${item.apCode} / ${item.name}`, value: item.id })), [aps, filters.storeCode]);

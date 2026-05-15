@@ -16,10 +16,28 @@ export const SettingsPage = () => {
   const [resetForm] = Form.useForm();
   const [resetTarget, setResetTarget] = useState<User | null>(null);
   const isAdmin = user?.role === 'ADMIN';
-  const { data: users, isPending: isUsersPending } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
-  const { data: stores } = useQuery({ queryKey: queryKeys.stores, queryFn: () => api.stores({}), enabled: isAdmin });
-  const { data: invites, isPending: isInvitesPending } = useQuery({ queryKey: queryKeys.userInvites, queryFn: api.userInvites, enabled: isAdmin });
-  const { data: auditLogs, isPending: isAuditLogsPending } = useQuery({ queryKey: queryKeys.auditLogs, queryFn: api.auditLogs, enabled: isAdmin });
+  const [userPagination, setUserPagination] = useState({ current: 1, pageSize: 50 });
+  const [invitePagination, setInvitePagination] = useState({ current: 1, pageSize: 50 });
+  const [auditPagination, setAuditPagination] = useState({ current: 1, pageSize: 50 });
+  const { data: users, isPending: isUsersPending } = useQuery({
+    queryKey: [...queryKeys.users, userPagination],
+    queryFn: () => api.users({ page: userPagination.current, pageSize: userPagination.pageSize }),
+    enabled: isAdmin,
+    placeholderData: (previous) => previous,
+  });
+  const { data: stores } = useQuery({ queryKey: queryKeys.stores, queryFn: () => api.stores({ pageSize: 200 }), enabled: isAdmin });
+  const { data: invites, isPending: isInvitesPending } = useQuery({
+    queryKey: [...queryKeys.userInvites, invitePagination],
+    queryFn: () => api.userInvites({ page: invitePagination.current, pageSize: invitePagination.pageSize }),
+    enabled: isAdmin,
+    placeholderData: (previous) => previous,
+  });
+  const { data: auditLogs, isPending: isAuditLogsPending } = useQuery({
+    queryKey: [...queryKeys.auditLogs, auditPagination],
+    queryFn: () => api.auditLogs({ page: auditPagination.current, pageSize: auditPagination.pageSize }),
+    enabled: isAdmin,
+    placeholderData: (previous) => previous,
+  });
   const createInvite = useMutation({
     mutationFn: api.createUserInvite,
     onSuccess: (result) => {
@@ -117,8 +135,17 @@ export const SettingsPage = () => {
         <Table
           rowKey="id"
           loading={isUsersPending}
-          dataSource={users ?? []}
-          pagination={false}
+          dataSource={users?.items ?? []}
+          pagination={{
+            current: users?.page ?? userPagination.current,
+            pageSize: users?.pageSize ?? userPagination.pageSize,
+            total: users?.total ?? 0,
+            showSizeChanger: true,
+          }}
+          onChange={(next) => setUserPagination({
+            current: next.current ?? 1,
+            pageSize: next.pageSize ?? 50,
+          })}
           columns={[
             { title: tx('用户名', 'Username'), dataIndex: 'username' },
             { title: tx('显示名称', 'Display Name'), dataIndex: 'displayName' },
@@ -153,8 +180,17 @@ export const SettingsPage = () => {
         <Table
           rowKey="id"
           loading={isInvitesPending}
-          dataSource={invites ?? []}
-          pagination={false}
+          dataSource={invites?.items ?? []}
+          pagination={{
+            current: invites?.page ?? invitePagination.current,
+            pageSize: invites?.pageSize ?? invitePagination.pageSize,
+            total: invites?.total ?? 0,
+            showSizeChanger: true,
+          }}
+          onChange={(next) => setInvitePagination({
+            current: next.current ?? 1,
+            pageSize: next.pageSize ?? 50,
+          })}
           columns={[
             { title: tx('用户名', 'Username'), dataIndex: 'username' },
             { title: tx('显示名称', 'Display Name'), dataIndex: 'displayName' },
@@ -196,8 +232,17 @@ export const SettingsPage = () => {
         <Table
           rowKey="id"
           loading={isAuditLogsPending}
-          dataSource={auditLogs ?? []}
-          pagination={false}
+          dataSource={auditLogs?.items ?? []}
+          pagination={{
+            current: auditLogs?.page ?? auditPagination.current,
+            pageSize: auditLogs?.pageSize ?? auditPagination.pageSize,
+            total: auditLogs?.total ?? 0,
+            showSizeChanger: true,
+          }}
+          onChange={(next) => setAuditPagination({
+            current: next.current ?? 1,
+            pageSize: next.pageSize ?? 50,
+          })}
           columns={[
             { title: tx('时间', 'Time'), dataIndex: 'createdAt', width: 220 },
             { title: tx('模块', 'Module'), dataIndex: 'module', width: 100 },

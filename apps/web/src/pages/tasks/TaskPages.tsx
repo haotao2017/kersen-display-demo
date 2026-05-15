@@ -26,8 +26,8 @@ export const TaskListPage = () => {
     setPagination((current) => ({ ...current, current: 1 }));
     setFilters((current) => ({ ...current, ...patch }));
   };
-  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
-  const userOptions = (users ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id }));
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: () => api.users({ pageSize: 200 }), enabled: isAdmin });
+  const userOptions = (users?.items ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id }));
   const { data, isPending } = useQuery({
     queryKey: [...queryKeys.tasks, filters, pagination],
     queryFn: () => api.tasks({ ...filters, page: pagination.current, pageSize: pagination.pageSize }),
@@ -116,7 +116,7 @@ export const TaskListPage = () => {
                 <Space>
                   <Button onClick={() => setTaskId(row.id)}>{tx('查看', 'View')}</Button>
                   <Button
-                    disabled={['queued', 'rendering', 'sending', 'success'].includes(normalizeTaskStatus(row.status))}
+                    disabled={['queued', 'trigger_pending', 'rendering', 'sending', 'success'].includes(normalizeTaskStatus(row.status))}
                     onClick={() => retry.mutate(row.id)}
                     loading={retry.isPending && retry.variables === row.id}
                   >

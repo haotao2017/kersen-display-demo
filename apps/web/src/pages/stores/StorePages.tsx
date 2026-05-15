@@ -19,7 +19,7 @@ export const StoreListPage = () => {
   const [editing, setEditing] = useState<Store | null>(null);
   const [filters, setFilters] = useState<{ ownerUserId?: string; keyword?: string }>({});
   const { data, isPending } = useQuery({ queryKey: [...queryKeys.stores, filters], queryFn: () => api.stores(filters), refetchInterval: 10_000 });
-  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: () => api.users({ pageSize: 200 }), enabled: isAdmin });
 
   const close = () => {
     setOpen(false);
@@ -58,7 +58,7 @@ export const StoreListPage = () => {
     setOpen(true);
   };
 
-  const userOptions = (users ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id }));
+  const userOptions = (users?.items ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id }));
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>

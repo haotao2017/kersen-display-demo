@@ -1,4 +1,4 @@
-import { App, Button, Card, Collapse, Descriptions, Drawer, Form, Input, InputNumber, Popconfirm, Select, Space, Switch, Table, Tag, Typography } from 'antd';
+import { App, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Popconfirm, Select, Space, Switch, Table, Tag, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -19,11 +19,17 @@ export const ApListPage = () => {
   const [form] = Form.useForm();
   const [open, setOpen] = useState(false);
   const [filters, setFilters] = useState<{ ownerUserId?: string; keyword?: string }>({});
-  const { data, isPending } = useQuery({ queryKey: [...queryKeys.aps, filters], queryFn: () => api.aps(filters), refetchInterval: 10_000 });
+  const [pagination, setPagination] = useState({ current: 1, pageSize: 50 });
+  const { data, isPending } = useQuery({
+    queryKey: [...queryKeys.aps, filters, pagination],
+    queryFn: () => api.aps({ ...filters, page: pagination.current, pageSize: pagination.pageSize }),
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  });
   const { data: stores } = useQuery({ queryKey: queryKeys.stores, queryFn: () => api.stores({}), refetchInterval: 10_000 });
-  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: () => api.users({ pageSize: 200 }), enabled: isAdmin });
   const storeOptions = useMemo(() => (stores?.items ?? []).map((item: any) => ({ label: `${item.name} / ${item.code}`, value: item.code })), [stores]);
-  const userOptions = useMemo(() => (users ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
+  const userOptions = useMemo(() => (users?.items ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
   const create = useMutation({
     mutationFn: api.createAp,
     onSuccess: () => {
@@ -81,75 +87,84 @@ export const ApListPage = () => {
               style={{ width: 240 }}
               options={userOptions}
               value={filters.ownerUserId}
-              onChange={(ownerUserId) => setFilters((current) => ({ ...current, ownerUserId }))}
+              onChange={(ownerUserId) => {
+                setPagination((current) => ({ ...current, current: 1 }));
+                setFilters((current) => ({ ...current, ownerUserId }));
+              }}
             />
           ) : null}
           <Input.Search
             allowClear
             placeholder={tx('搜索基站编号/名称/门店', 'Search station code/name/store')}
             style={{ width: 280 }}
-            onSearch={(keyword) => setFilters((current) => ({ ...current, keyword: keyword.trim() || undefined }))}
+            onSearch={(keyword) => {
+              setPagination((current) => ({ ...current, current: 1 }));
+              setFilters((current) => ({ ...current, keyword: keyword.trim() || undefined }));
+            }}
           />
         </Space>
       </Card>
-      <Collapse
-        defaultActiveKey={(stores?.items ?? []).map((item: any) => item.code)}
-        items={(stores?.items ?? []).map((store: any) => {
-          const rows = (data?.items ?? []).filter((item: any) => item.storeCode === store.code);
-          return {
-            key: store.code,
-            label: (
+      <Table
+        rowKey="id"
+        loading={isPending}
+        dataSource={data?.items ?? []}
+        pagination={{
+          current: data?.page ?? pagination.current,
+          pageSize: data?.pageSize ?? pagination.pageSize,
+          total: data?.total ?? 0,
+          showSizeChanger: true,
+          pageSizeOptions: [20, 50, 100, 200],
+          showTotal: (total) => tx(`共 ${total} 条`, `${total} total`),
+        }}
+        onChange={(next) => setPagination({
+          current: next.current ?? 1,
+          pageSize: next.pageSize ?? 50,
+        })}
+        columns={[
+          ...(isAdmin ? [{ title: tx('归属账号', 'Owner'), render: (_: unknown, row: any) => row.owner?.displayName || row.owner?.username || row.ownerUserId || '-' }] : []),
+          {
+            title: tx('所属门店', 'Store'),
+            render: (_: unknown, row: any) => (
               <Space>
-                <span>{store.name}</span>
-                <Tag>{store.code}</Tag>
-                <Tag color={rows.some((item: any) => item.online) ? 'green' : 'default'}>{rows.filter((item: any) => item.online).length}/{rows.length}</Tag>
+                <span>{row.storeName || row.storeCode || '-'}</span>
+                {row.storeCode ? <Tag>{row.storeCode}</Tag> : null}
               </Space>
             ),
-            children: (
-              <Table
-                rowKey="id"
-                loading={isPending}
-                dataSource={rows}
-                columns={[
-                  ...(isAdmin ? [{ title: tx('归属账号', 'Owner'), render: (_: unknown, row: any) => row.owner?.displayName || row.owner?.username || row.ownerUserId || '-' }] : []),
-                  { title: tx('AP 编码', 'AP Code'), dataIndex: 'apCode' },
-                  { title: tx('名称', 'Name'), dataIndex: 'name' },
-                  {
-                    title: tx('状态', 'Status'),
-                    render: (_, row: any) => (
-                      <Tag color={row.online ? 'green' : 'default'}>
-                        {row.online ? tx('在线', 'Online') : tx('离线', 'Offline')}
-                      </Tag>
-                    ),
-                  },
-                  { title: tx('已绑定显示节点数', 'Bound Display Nodes'), dataIndex: 'deviceCount' },
-                  { title: tx('自动发现显示节点数', 'Discovered Display Nodes'), dataIndex: 'discoveredDeviceCount' },
-                  {
-                    title: tx('操作', 'Actions'),
-                    render: (_, row: any) => (
-                      <Space>
-                        <Button onClick={() => navigate(`/aps/${row.id}`)}>{tx('查看', 'View')}</Button>
-                        <Switch
-                          checked={row.config?.autoImportScannedLabels === true}
-                          checkedChildren={tx('入库开', 'Import on')}
-                          unCheckedChildren={tx('入库关', 'Import off')}
-                          loading={updateAutoImport.isPending && updateAutoImport.variables?.id === row.id}
-                          onChange={(checked) => {
-                            if (checked) {
-                              confirmEnableAutoImport(row);
-                              return;
-                            }
-                            updateAutoImport.mutate({ id: row.id, enabled: false });
-                          }}
-                        />
-                      </Space>
-                    ),
-                  },
-                ]}
-              />
+          },
+          { title: tx('AP 编码', 'AP Code'), dataIndex: 'apCode' },
+          { title: tx('名称', 'Name'), dataIndex: 'name' },
+          {
+            title: tx('状态', 'Status'),
+            render: (_, row: any) => (
+              <Tag color={row.online ? 'green' : 'default'}>
+                {row.online ? tx('在线', 'Online') : tx('离线', 'Offline')}
+              </Tag>
             ),
-          };
-        })}
+          },
+          { title: tx('已绑定显示节点数', 'Bound Display Nodes'), dataIndex: 'deviceCount' },
+          { title: tx('自动发现显示节点数', 'Discovered Display Nodes'), dataIndex: 'discoveredDeviceCount' },
+          {
+            title: tx('操作', 'Actions'),
+            render: (_, row: any) => (
+              <Space>
+                <Button onClick={() => navigate(`/aps/${row.id}`)}>{tx('查看', 'View')}</Button>
+                <Switch
+                  checked={row.config?.autoImportScannedLabels === true}
+                  checkedChildren={tx('入库开', 'Import on')}
+                  unCheckedChildren={tx('入库关', 'Import off')}
+                  loading={updateAutoImport.isPending && updateAutoImport.variables?.id === row.id}
+                  onChange={(checked) => {
+                    if (checked) {
+                      confirmEnableAutoImport(row);
+                      return;
+                    }
+                    updateAutoImport.mutate({ id: row.id, enabled: false });
+                  }}
+                />
+              </Space>
+            ),
+          },
+        ]}
       />
       <Drawer
         title={tx('新增基站', 'New Station')}
@@ -255,7 +270,7 @@ export const ApDetailPage = () => {
     enabled: Boolean(id),
     refetchInterval: 10_000,
   });
-  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: () => api.users({ pageSize: 200 }), enabled: isAdmin });
   const sync = useMutation({
     mutationFn: api.syncApStatus,
     onSuccess: async () => {
@@ -627,7 +642,7 @@ export const ApDetailPage = () => {
           <Form.Item name="targetUserId" label={tx('目标账号', 'Target User')} rules={[{ required: true, message: tx('请选择目标账号', 'Select a target user') }]}>
             <Select
               placeholder={tx('请选择目标账号', 'Select a target user')}
-              options={(users ?? []).map((item) => ({
+              options={(users?.items ?? []).map((item) => ({
                 label: `${item.displayName || item.username} (${item.role})`,
                 value: item.id,
               }))}

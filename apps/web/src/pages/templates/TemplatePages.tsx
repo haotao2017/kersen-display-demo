@@ -914,8 +914,8 @@ export const TemplateListPage = () => {
   const isAdmin = currentUser?.role === 'ADMIN';
   const [filters, setFilters] = useState<{ ownerUserId?: string; keyword?: string }>({});
   const { data, isPending } = useQuery({ queryKey: [...queryKeys.templates, filters], queryFn: () => api.templates(filters) });
-  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin });
-  const userOptions = useMemo(() => (users ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: () => api.users({ pageSize: 200 }), enabled: isAdmin });
+  const userOptions = useMemo(() => (users?.items ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
   const publish = useMutation({
     mutationFn: (id: string) => api.publishTemplate(id, true),
     onSuccess: () => {
@@ -1024,7 +1024,7 @@ export const TemplateFormPage = () => {
   const [form] = Form.useForm();
   const isEdit = Boolean(id);
   const { data, isPending } = useQuery({ queryKey: id ? queryKeys.template(id) : ['template-create'], queryFn: () => api.template(id!), enabled: isEdit });
-  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: api.users, enabled: isAdmin && !isEdit });
+  const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: () => api.users({ pageSize: 200 }), enabled: isAdmin && !isEdit });
   const mutation = useMutation({
     mutationFn: (values: any) => (isEdit ? api.updateTemplate(id!, values) : api.createTemplate(values)),
     onSuccess: (result: any) => navigate(`/templates/${result.id}/designer`),
@@ -1046,7 +1046,7 @@ export const TemplateFormPage = () => {
     });
   }, [currentPresetId, data, form]);
 
-  const userOptions = (users ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id }));
+  const userOptions = (users?.items ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id }));
 
   return (
     <Card loading={isEdit && isPending}>

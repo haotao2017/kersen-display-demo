@@ -8,7 +8,12 @@ import { getTaskUserText } from '../../utils/taskText';
 
 export const DashboardPage = () => {
   const { tx } = useI18n();
-  const { data, isPending } = useQuery({ queryKey: queryKeys.dashboard, queryFn: api.dashboard });
+  const { data, isPending } = useQuery({
+    queryKey: queryKeys.dashboard,
+    queryFn: api.dashboard,
+    refetchInterval: 5000,
+    refetchIntervalInBackground: true,
+  });
   const apEventText = (item: any) => {
     const raw = String(item?.message ?? '');
     if (raw.includes('离线') || raw.toLowerCase().includes('offline')) return tx('基站离线', 'Station offline');

@@ -45,6 +45,8 @@ type DeviceRetrieveMessage = {
   >;
 };
 
+type DeviceRetrievePayload = NonNullable<DeviceRetrieveMessage['data']>[string];
+
 type SlaveAdvSvcMessage = {
   type: 'SLAVE_ADV_SVC';
   addr?: string;
@@ -100,6 +102,38 @@ function normalizeApIdentifier(value?: string) {
   return normalizeMac(value) ?? String(value ?? '').trim().toLowerCase();
 }
 
+function normalizeHex(value?: string) {
+  const hex = String(value ?? '').replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+  return hex || undefined;
+}
+
+function normalizeScannedLabelId(value?: string, allowAddressPrefix = false) {
+  const hex = normalizeHex(value);
+  if (!hex) {
+    return undefined;
+  }
+  if (hex.length === 8) {
+    return hex;
+  }
+  if (allowAddressPrefix && hex.length > 8) {
+    return hex.slice(0, 8);
+  }
+  return undefined;
+}
+
+function apHexId(ap?: BaseStation) {
+  return normalizeHex(ap?.mac) ?? normalizeHex(ap?.id);
+}
+
+function isApSelfAddress(rawAddress: string | undefined, labelId: string, ap?: BaseStation) {
+  const addressHex = normalizeHex(rawAddress);
+  const apHex = apHexId(ap);
+  if (!addressHex || !apHex || apHex.length < 8) {
+    return false;
+  }
+  return addressHex === apHex || labelId === apHex.slice(0, 8);
+}
+
 function normalizeIp(value?: string) {
   if (!value) {
     return undefined;
@@ -109,6 +143,19 @@ function normalizeIp(value?: string) {
 
 function offlineAfterMs() {
   return Number(process.env.AP_OFFLINE_AFTER_SECONDS ?? 90) * 1000;
+}
+
+function labelOfflineAfterMs() {
+  return Math.max(180_000, Math.min(900_000, Number(process.env.LABEL_OFFLINE_AFTER_SECONDS ?? 300) * 1000));
+}
+
+function labelOnlineStableMs() {
+  return Math.max(60_000, Math.min(3_600_000, Number(process.env.LABEL_ONLINE_STABLE_SECONDS ?? 900) * 1000));
+}
+
+function isWithinMs(value: unknown, maxAgeMs: number) {
+  const time = new Date(String(value ?? '')).getTime();
+  return Number.isFinite(time) && Date.now() - time <= maxAgeMs;
 }
 
 function apAutoImportEnabled(ap?: BaseStation) {
@@ -409,6 +456,7 @@ export class ApWebsocketService {
           ip: request.socket.remoteAddress,
           firmware: current?.firmware ?? 'unknown',
           status: 'online',
+          onlineAt: new Date().toISOString(),
           lastSeenAt: new Date().toISOString(),
           metrics: current?.metrics ?? {},
         });
@@ -1634,6 +1682,18 @@ export class ApWebsocketService {
       nextStatus = 'failed';
       resultMsg = '刷新失败：已多次自动唤醒并重试，仍未收到价签确认。';
       task.payload = { ...taskPayload, retryInFlight: false };
+    } else if (nextStatus === 'timeout') {
+      const attempts = Number(taskPayload.deferredRetryAttempts ?? 0);
+      const maxAttempts = Math.max(1, Math.min(20, Number(process.env.ESL_REFRESH_DEFERRED_RETRY_MAX ?? 10)));
+      if (attempts >= maxAttempts) {
+        nextStatus = 'failed';
+        resultMsg = `刷新失败：待触发期间已间隔重试 ${maxAttempts} 次，仍未收到价签确认。`;
+        task.payload = { ...taskPayload, retryInFlight: false, deferredRetryExhausted: true };
+      } else {
+        nextStatus = 'trigger_pending';
+        resultMsg = `长时间未收到价签最终确认，任务已转为待触发；系统会间隔 30 秒重新尝试下发（已尝试 ${attempts}/${maxAttempts} 次）。`;
+        task.payload = { ...taskPayload, retryInFlight: false, needsDeferredRetry: true };
+      }
     } else if (
       nextStatus === 'sending'
       && taskPayload.retryInFlight === true
@@ -1951,7 +2011,11 @@ export class ApWebsocketService {
       }
 
       if (!ignoreLabelEvents && type === 'SLAVE_ADV_SVC' && typeof parsed.addr === 'string') {
-        const labelId = parsed.addr.slice(0, 8);
+        const labelId = normalizeScannedLabelId(parsed.addr, true);
+        const ap = context?.apId ? this.db.baseStations.get(context.apId) : undefined;
+        if (!labelId || isApSelfAddress(parsed.addr, labelId, ap)) {
+          return;
+        }
         await this.mqtt.publishJson(`stores/${storeCode}/labels/${labelId}/events`, {
           ...envelope,
           labelId,
@@ -1987,6 +2051,15 @@ export class ApWebsocketService {
     this.db.save();
   }
 
+  private shouldImportScannedLabels(ap?: BaseStation) {
+    return apAutoImportEnabled(ap) || Boolean(ap?.id && [...this.db.labels.values()].some((label) => label.apId === ap.id));
+  }
+
+  private resolveSingleOnlineAp() {
+    const onlineAps = [...this.db.baseStations.values()].filter((item) => item.status === 'online');
+    return onlineAps.length === 1 ? onlineAps[0] : undefined;
+  }
+
   private applyApOnline(message: ApOnlineMessage, ws: WebSocket, remoteAddress?: string) {
     const apId = message.ap_code;
     this.activeSockets.set(apId, ws);
@@ -2018,6 +2091,7 @@ export class ApWebsocketService {
       config: matchedAp?.config ?? {},
       discoveredLabels: matchedAp?.discoveredLabels ?? {},
       status: 'online',
+      onlineAt: new Date().toISOString(),
       lastSeenAt: new Date().toISOString(),
       metrics: matchedAp?.metrics ?? {},
     };
@@ -2157,19 +2231,63 @@ export class ApWebsocketService {
   }
 
   private applyDeviceRetrieve(message: DeviceRetrieveMessage, context?: ApSocketContext) {
-    const entries = Object.entries(message.data ?? {});
+    const rawEntries = Object.entries(message.data ?? {});
     const ap = (context?.apId ? this.db.baseStations.get(context.apId) : undefined)
-      ?? [...this.db.baseStations.values()].find((item) => item.status === 'online');
+      ?? this.resolveSingleOnlineAp();
+    if (!ap) {
+      if (rawEntries.length) {
+        this.db.recordRequest({
+          method: 'AP-SCAN-SKIP',
+          path: '/ws/device-retrieve',
+          statusCode: 422,
+          body: {
+            reason: 'missing_ap_context',
+            entryCount: rawEntries.length,
+            sampleLabelIds: rawEntries.slice(0, 5).map(([labelId]) => labelId),
+          },
+        });
+      }
+      return;
+    }
+    const entries = rawEntries
+      .map(([rawLabelId, payload]) => [normalizeScannedLabelId(rawLabelId), payload, rawLabelId] as const)
+      .filter((entry): entry is readonly [string, DeviceRetrievePayload, string] => Boolean(entry[0]));
+    if (entries.length !== rawEntries.length) {
+      this.db.recordRequest({
+        method: 'AP-SCAN-SKIP',
+        path: `/aps/${ap.id}/device-retrieve`,
+        statusCode: 422,
+        body: {
+          reason: 'invalid_label_id',
+          skippedCount: rawEntries.length - entries.length,
+          sampleLabelIds: rawEntries
+            .filter(([rawLabelId]) => !normalizeScannedLabelId(rawLabelId))
+            .slice(0, 5)
+            .map(([rawLabelId]) => rawLabelId),
+        },
+      });
+    }
     const apId = ap?.id;
     const storeCode = ap?.storeCode ?? process.env.UPSTREAM_STORE_CODE ?? '20248517';
     const seenLabelIds = new Set(entries.map(([labelId]) => labelId));
     const warmupScanIgnored = this.isWarmupScanIgnored(apId);
-    const shouldAutoImport = apAutoImportEnabled(ap);
+    const shouldAutoImport = this.shouldImportScannedLabels(ap);
     const discoveredLabels = { ...(ap?.discoveredLabels ?? {}) };
 
     if (apId && shouldAutoImport && !warmupScanIgnored) {
       for (const label of this.db.labels.values()) {
         if (label.apId === apId && !seenLabelIds.has(label.id)) {
+          const connectivity = label && typeof label.connectivity === 'object'
+            ? label.connectivity
+            : {};
+          if (label.status === 'online' && connectivity.state === 'online' && isWithinMs(connectivity.checkedAt, labelOnlineStableMs())) {
+            continue;
+          }
+          const discovered = discoveredLabels[label.id];
+          const lastSeenAt = typeof discovered?.lastSeenAt === 'string' ? discovered.lastSeenAt : label.updatedAt;
+          if (isWithinMs(lastSeenAt, labelOfflineAfterMs())) {
+            continue;
+          }
           this.db.labels.set(label.id, {
             ...label,
             status: 'offline',
@@ -2208,6 +2326,14 @@ export class ApWebsocketService {
         battery: current?.battery,
         rssi: averageRssi(payload.master_rx_rssi),
         services: payload.service_list,
+        connectivity: {
+          mode: 'device_retrieve',
+          state: 'online',
+          checkedAt: lastSeenAt,
+          detail: '基站扫描上报 DEVICE_RETRIEVE',
+          offlineProbeFailures: 0,
+          nextProbeAt: new Date(Date.now() + labelOnlineStableMs()).toISOString(),
+        },
         updatedAt: lastSeenAt,
       };
       this.db.labels.set(label.id, label);
@@ -2230,18 +2356,37 @@ export class ApWebsocketService {
   }
 
   private applySlaveAdv(message: SlaveAdvSvcMessage, context?: ApSocketContext) {
-    const labelId = message.addr?.slice(0, 8);
-    if (!labelId) {
+    const ap = (context?.apId ? this.db.baseStations.get(context.apId) : undefined)
+      ?? this.resolveSingleOnlineAp();
+    if (!ap) {
+      this.db.recordRequest({
+        method: 'AP-SCAN-SKIP',
+        path: '/ws/slave-adv',
+        statusCode: 422,
+        body: { reason: 'missing_ap_context', addr: message.addr },
+      });
+      return;
+    }
+    const labelId = normalizeScannedLabelId(message.addr, true);
+    if (!labelId || isApSelfAddress(message.addr, labelId, ap)) {
+      this.db.recordRequest({
+        method: 'AP-SCAN-SKIP',
+        path: `/aps/${ap.id}/slave-adv`,
+        statusCode: 422,
+        body: {
+          reason: labelId ? 'ap_self_or_non_label_address' : 'invalid_label_id',
+          addr: message.addr,
+          labelId,
+        },
+      });
       return;
     }
 
-    const ap = (context?.apId ? this.db.baseStations.get(context.apId) : undefined)
-      ?? [...this.db.baseStations.values()].find((item) => item.status === 'online');
     const current = this.db.labels.get(labelId);
     const currentRow = (current ?? {}) as Label & Record<string, unknown>;
     const services = Object.fromEntries((message.service_list ?? []).map((item) => [item.service ?? 'unknown', item.b64dat ?? '']));
     const lastSeenAt = new Date().toISOString();
-    if (apAutoImportEnabled(ap)) {
+    if (this.shouldImportScannedLabels(ap)) {
       this.db.labels.set(labelId, {
         ...currentRow,
         id: labelId,
@@ -2255,6 +2400,14 @@ export class ApWebsocketService {
         battery: current?.battery,
         rssi: message.master_rx_rssi,
         services: { ...(current?.services ?? {}), ...services },
+        connectivity: {
+          mode: 'slave_adv',
+          state: 'online',
+          checkedAt: lastSeenAt,
+          detail: '基站扫描上报 SLAVE_ADV_SVC',
+          offlineProbeFailures: 0,
+          nextProbeAt: new Date(Date.now() + labelOnlineStableMs()).toISOString(),
+        },
         updatedAt: lastSeenAt,
       });
     }
