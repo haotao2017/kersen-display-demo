@@ -56,6 +56,7 @@ type LocalImagePacket = {
   command: Row;
   payloadBytes: number;
   imageBytes: number;
+  clearBeforeWrite: boolean;
   imageFormat: string;
   renderMode: string;
   fit: string;
@@ -1802,6 +1803,14 @@ export class LocalCloudController {
         status: label.status,
       },
     } as Row;
+    const template = this.resolveEffectiveTemplateForLabel(label as Label & Row);
+    if (this.normalizeTemplateColorMode(template?.colorMode) === 'bw') {
+      task.payload = {
+        ...(task.payload as Row),
+        colorMode: 'bw',
+        requireWriteSvcAck: true,
+      };
+    }
     return task;
   }
 
@@ -2015,6 +2024,9 @@ export class LocalCloudController {
         previewImageUrl: render.previewImageUrl,
       };
       const delivery = await this.deliverRefreshTask(label, render, latestBeforeDelivery.id);
+      if (delivery.apId) {
+        latestBeforeDelivery.apId = delivery.apId;
+      }
       latestBeforeDelivery.status = delivery.ok ? 'sending' : 'failed';
       latestBeforeDelivery.resultMsg = delivery.reason;
       latestBeforeDelivery.delivery = delivery;
@@ -2038,6 +2050,10 @@ export class LocalCloudController {
     const labelStatus = this.effectiveLabelStatus(label);
     const payload = task.payload && typeof task.payload === 'object' ? task.payload as Row : {};
     const apId = this.resolveDeliveryApId(label);
+    if (apId && String(task.apId ?? '') !== apId) {
+      task.apId = apId;
+      this.db.cloudTasks.set(String(task.id), task);
+    }
     const alreadyVerified = this.hasRecentVerifiedLabelContact(label, LABEL_ONLINE_STABLE_MS, apId);
     if (labelStatus === 'online' && alreadyVerified && payload.preflightWakeRequired !== true) {
       return { ok: true, alreadyOnline: true };
@@ -2447,6 +2463,7 @@ export class LocalCloudController {
         source: 'api/v1',
         taskId,
         render: { width: render.width, height: render.height },
+        colorMode: this.normalizeTemplateColorMode(render.colorMode),
         localProtocol: packet.renderMode,
         preflight,
       },
@@ -2475,6 +2492,7 @@ export class LocalCloudController {
         imageFormat: packet.imageFormat,
         payloadBytes: packet.payloadBytes,
         imageBytes: packet.imageBytes,
+        clearBeforeWrite: packet.clearBeforeWrite,
         fit: packet.fit,
         resample: packet.resample,
         dither: packet.dither,
@@ -2491,9 +2509,9 @@ export class LocalCloudController {
     return {
       ok: wsResult.ok || mqttOk,
       reason: wsResult.ok
-        ? `已打开快速监听窗口并下发（待执行确认），tracking=${wsResult.trackingId}，参数：${packet.renderMode} / ${packet.resample} / dither=${packet.dither}`
+        ? `已打开快速监听窗口并下发（待执行确认），tracking=${wsResult.trackingId}，参数：${packet.renderMode} / ${packet.resample} / clear=${packet.clearBeforeWrite} / dither=${packet.dither}`
         : mqttOk
-          ? `刷新任务已提交到本地 MQTT，并已尝试打开快速监听窗口；当前没有可用 WebSocket 连接。参数：${packet.renderMode} / ${packet.resample} / dither=${packet.dither}`
+          ? `刷新任务已提交到本地 MQTT，并已尝试打开快速监听窗口；当前没有可用 WebSocket 连接。参数：${packet.renderMode} / ${packet.resample} / clear=${packet.clearBeforeWrite} / dither=${packet.dither}`
           : `刷新任务下发失败：WebSocket 不可用，MQTT 发布失败（${mqttResults.find((item) => !item.ok)?.reason ?? 'unknown'}）。`,
       commandId: command.id,
       transport: wsResult.ok ? 'websocket-read-write-svc+mqtt' : mqttOk ? 'mqtt' : 'none',
@@ -2506,7 +2524,9 @@ export class LocalCloudController {
         imageBytes: packet.imageBytes,
         imageFormat: packet.imageFormat,
         renderMode: packet.renderMode,
+        clearBeforeWrite: packet.clearBeforeWrite,
       },
+      apId,
     };
   }
 
@@ -2658,6 +2678,32 @@ export class LocalCloudController {
     const discovered = discoveredLabels[label.id];
     const lastSeenAt = stringValue(discovered?.lastSeenAt);
     return Boolean(discovered) && isWithinMs(lastSeenAt || label.updatedAt, maxAgeMs);
+  }
+
+  private recentlyScannedApIdsForLabel(label: Label, maxAgeMs = LABEL_ONLINE_STABLE_MS) {
+    return [...this.db.baseStations.values()]
+      .map((ap) => {
+        const discoveredLabels = ap.discoveredLabels && typeof ap.discoveredLabels === 'object'
+          ? ap.discoveredLabels as Record<string, Row>
+          : {};
+        const discovered = discoveredLabels[label.id];
+        const lastSeenAt = stringValue(discovered?.lastSeenAt);
+        const lastSeenMs = new Date(lastSeenAt || '').getTime();
+        return {
+          apId: ap.id,
+          connected: this.apWebsocket.getConnectionStatus(ap.id).connected,
+          online: ap.status === 'online' && isRecentActivity(ap.lastSeenAt),
+          seenAt: Number.isFinite(lastSeenMs) ? lastSeenMs : 0,
+          recent: Boolean(discovered) && isWithinMs(lastSeenAt || label.updatedAt, maxAgeMs),
+        };
+      })
+      .filter((item) => item.recent)
+      .sort((left, right) => {
+        if (left.connected !== right.connected) return left.connected ? -1 : 1;
+        if (left.online !== right.online) return left.online ? -1 : 1;
+        return right.seenAt - left.seenAt;
+      })
+      .map((item) => item.apId);
   }
 
   private hasRecentVerifiedLabelContact(label: Label, maxAgeMs = LABEL_ONLINE_STABLE_MS, apId = label.apId) {
@@ -3276,16 +3322,24 @@ export class LocalCloudController {
     ])];
     const preset = this.resolveScreenPreset(render, labelId);
     const packetColorMode = this.normalizeTemplateColorMode(render.colorMode);
+    const packing = preset.packing ?? (preset.bpp === 1 ? '1bpp' : '2bpp');
+    const physicalOneBit = preset.bpp === 1 || packing === '1bpp' || packing === 'bwr_planes';
+    const preserveHardEdges = physicalOneBit || packetColorMode === 'bw' || packetColorMode === 'bwr';
+    const resampleKernel = preserveHardEdges ? 'nearest' : 'linear';
     const sourceRgba = preset.service === '01-00-00-0c'
       ? await this.renderIntoService0cCanvas(render, preset.width, preset.height)
-      : await this.transformRenderedRgba(render.rgba, render.width, render.height, preset.width, preset.height, preset.rotate, preset.mirrorX);
-    const packing = preset.packing ?? (preset.bpp === 1 ? '1bpp' : '2bpp');
+      : await this.transformRenderedRgba(render.rgba, render.width, render.height, preset.width, preset.height, preset.rotate, preset.mirrorX, resampleKernel);
     const packedRows = packing === 'bwr_planes'
       ? this.packImageBwrPlanes(sourceRgba, preset.width, preset.height)
-      : packing === '1bpp' || packetColorMode === 'bw'
+      : packing === '1bpp'
         ? this.packImage1Bpp(sourceRgba, preset.width, preset.height)
-        : this.packImage2Bpp(sourceRgba, preset.width, preset.height);
+        : this.packImage2Bpp(sourceRgba, preset.width, preset.height, packetColorMode);
     const imageBytes = this.buildChunkedImageContainer(preset.magic, packedRows);
+    const clearBeforeWrite = false;
+    const imageWriteOptions = {
+      ...(preset.supersize ? { supersize: true, mtu: preset.mtu ?? 10000 } : {}),
+      ...(preset.service === '01-00-00-03' ? { bigsize: false, mtu: preset.mtu ?? 10000 } : {}),
+    };
     const command: Row = {
       type: 'READ_WRITE_SVC',
       opas: [
@@ -3298,8 +3352,7 @@ export class LocalCloudController {
               type: 'WRITE_SVC',
               service: preset.service,
               b64dat: imageBytes.toString('base64'),
-              ...(preset.supersize ? { supersize: true, mtu: preset.mtu ?? 10000 } : {}),
-              ...(preset.service === '01-00-00-03' ? { bigsize: false, mtu: preset.mtu ?? 10000 } : {}),
+              ...imageWriteOptions,
             },
           ],
         },
@@ -3312,10 +3365,11 @@ export class LocalCloudController {
       command,
       payloadBytes: Buffer.byteLength(JSON.stringify(command)),
       imageBytes: imageBytes.length,
-      imageFormat: `${preset.service}/${packing === 'bwr_planes' ? 'bwr-planes' : `${packing === '1bpp' || packetColorMode === 'bw' ? 1 : 2}bpp`}`,
+      clearBeforeWrite,
+      imageFormat: `${preset.service}/${packing === 'bwr_planes' ? 'bwr-planes' : `${packing === '1bpp' ? 1 : 2}bpp${packetColorMode === 'bw' && packing !== '1bpp' ? '-bw-palette' : ''}`}`,
       renderMode: preset.mode,
       fit: 'stretch',
-      resample: 'bilinear',
+      resample: resampleKernel === 'nearest' ? 'nearest' : 'bilinear',
       dither: packetColorMode !== 'bwr',
       width: preset.width,
       height: preset.height,
@@ -3338,9 +3392,10 @@ export class LocalCloudController {
     const colorMode = this.normalizeTemplateColorMode(template.colorMode);
     const normalizedSchema = resizeSchemaToCanvas(schema, width, height, stringValue(template.deviceType, 'ET0750-89'), colorMode);
     const bindings = this.buildTemplateBindings(label, product);
-    const svg = await this.renderTemplateSvg(normalizedSchema, bindings, width, height);
+    const svg = await this.renderTemplateSvg(normalizedSchema, bindings, width, height, colorMode);
     const { data: rgba } = await sharp(Buffer.from(svg))
       .resize(width, height, { fit: 'fill', kernel: 'linear' })
+      .flatten({ background: '#ffffff' })
       .ensureAlpha()
       .raw()
       .toBuffer({ resolveWithObject: true });
@@ -3391,12 +3446,12 @@ export class LocalCloudController {
     };
   }
 
-  private async renderTemplateSvg(schema: Row, bindings: Record<string, string>, width: number, height: number) {
+  private async renderTemplateSvg(schema: Row, bindings: Record<string, string>, width: number, height: number, colorMode: string = 'bwr') {
     const elements = Array.isArray(schema?.elements) ? schema.elements as Row[] : [];
     const body = (await Promise.all(elements
       .filter((item) => item.visible !== false)
       .sort((left, right) => numberValue(left.zIndex, 0) - numberValue(right.zIndex, 0))
-      .map((item, index) => this.renderPreviewElement(item, bindings, index))))
+      .map((item, index) => this.renderPreviewElement(item, bindings, index, colorMode === 'bw' || colorMode === 'bwr'))))
       .join('');
     return [
       `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
@@ -3446,12 +3501,22 @@ export class LocalCloudController {
   private async renderIntoService0cCanvas(render: RenderedTemplateImage, width: number, height: number) {
     return sharp(render.rgba, { raw: { width: render.width, height: render.height, channels: 4 } })
       .resize(width, height, { fit: 'fill', kernel: 'linear' })
+      .flatten({ background: '#ffffff' })
       .ensureAlpha()
       .raw()
       .toBuffer();
   }
 
-  private async transformRenderedRgba(rgba: Buffer, sourceWidth: number, sourceHeight: number, width: number, height: number, rotate: number, mirrorX: boolean) {
+  private async transformRenderedRgba(
+    rgba: Buffer,
+    sourceWidth: number,
+    sourceHeight: number,
+    width: number,
+    height: number,
+    rotate: number,
+    mirrorX: boolean,
+    kernel: 'nearest' | 'linear' = 'linear',
+  ) {
     let pipeline = sharp(rgba, { raw: { width: sourceWidth, height: sourceHeight, channels: 4 } });
     if (rotate) {
       pipeline = pipeline.rotate(rotate);
@@ -3460,7 +3525,8 @@ export class LocalCloudController {
       pipeline = pipeline.flop();
     }
     return pipeline
-      .resize(width, height, { fit: 'fill', kernel: 'linear' })
+      .resize(width, height, { fit: 'fill', kernel })
+      .flatten({ background: '#ffffff' })
       .ensureAlpha()
       .raw()
       .toBuffer();
@@ -3501,11 +3567,13 @@ export class LocalCloudController {
     return output;
   }
 
-  private packImage2Bpp(rgba: Buffer, width: number, height: number) {
+  private packImage2Bpp(rgba: Buffer, width: number, height: number, colorMode: string = 'bwry') {
     const output = Buffer.alloc(Math.ceil(width * height / 4), 0x55);
     for (let pixel = 0; pixel < width * height; pixel += 1) {
       const offset = pixel * 4;
-      const code = this.colorCode2Bpp(rgba[offset], rgba[offset + 1], rgba[offset + 2]);
+      const code = stringValue(colorMode).includes('bw') && !stringValue(colorMode).includes('r') && !stringValue(colorMode).includes('y')
+        ? this.colorCode2BppBw(rgba[offset], rgba[offset + 1], rgba[offset + 2])
+        : this.colorCode2Bpp(rgba[offset], rgba[offset + 1], rgba[offset + 2]);
       const byteIndex = Math.floor(pixel / 4);
       const shift = (3 - (pixel % 4)) * 2;
       output[byteIndex] = (output[byteIndex] & ~(0b11 << shift)) | ((code & 3) << shift);
@@ -3518,6 +3586,11 @@ export class LocalCloudController {
     if (r > 190 && g > 150 && b < 90) return 2;
     if (r > 180 && g < 110 && b < 110) return 3;
     return 1;
+  }
+
+  private colorCode2BppBw(r: number, g: number, b: number) {
+    const lum = r * 0.299 + g * 0.587 + b * 0.114;
+    return lum < 160 ? 0 : 1;
   }
 
   private packImage1Bpp(rgba: Buffer, width: number, height: number) {
@@ -3578,10 +3651,8 @@ export class LocalCloudController {
 
   private resolveDeliveryApId(label: Label) {
     const candidates = [
+      ...this.recentlyScannedApIdsForLabel(label),
       label.apId,
-      ...[...this.db.baseStations.values()]
-        .filter((item) => item.status === 'online')
-        .map((item) => item.id),
     ].filter((item): item is string => Boolean(item));
 
     const uniqueCandidates = [...new Set(candidates)];
@@ -3607,10 +3678,10 @@ export class LocalCloudController {
       sku: 'SKU',
       barcode: '6900000000000',
       imageUrl: '',
-    }, width, height);
+    }, width, height, 'bw');
   }
 
-  private async renderPreviewElement(item: Row, bindings: Record<string, string> = {}, index = 0) {
+  private async renderPreviewElement(item: Row, bindings: Record<string, string> = {}, index = 0, bwMode = false) {
     const type = String(item.type ?? 'text');
     const x = numberValue(item.x, 0);
     const y = numberValue(item.y, 0);
@@ -3626,24 +3697,24 @@ export class LocalCloudController {
       return resolvedHref ? `<image href="${escapeXml(resolvedHref)}" x="${x}" y="${y}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid slice"/>` : `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${escapeXml(style.background ?? '#ffffff')}"/>`;
     }
     if (type === 'rect') {
-      return `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${escapeXml(style.fill ?? style.background ?? '#ffffff')}" stroke="${escapeXml(style.stroke ?? '#111111')}"/>`;
+      return this.renderSvgBox(x, y, width, height, style.fill ?? style.background ?? '#ffffff', style.stroke ?? '#111111', numberValue(style.strokeWidth, 1), bwMode);
     }
     if (type === 'line') {
-      return `<line x1="${x}" y1="${y}" x2="${x + width}" y2="${y + height}" stroke="${escapeXml(style.stroke ?? '#111111')}" stroke-width="${numberValue(style.strokeWidth, 1)}"/>`;
+      return `<line x1="${x}" y1="${y}" x2="${x + width}" y2="${y + height}" stroke="${escapeXml(style.stroke ?? '#111111')}" stroke-width="${numberValue(style.strokeWidth, 1)}" shape-rendering="crispEdges"/>`;
     }
     if (type === 'barcode') {
       const stroke = escapeXml(style.stroke ?? '#111111');
       const background = escapeXml(style.background ?? '#ffffff');
       const text = boundText || stringValue(item.expression, stringValue(item.bindingField, 'barcode'));
       const barSvg = this.renderBarcodeSvg(text, width, height);
-      return `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${background}" stroke="${stroke}" stroke-width="1"/>${fitSvgImage(barSvg, x + 2, y + 2, Math.max(1, width - 4), Math.max(1, height - 4))}`;
+      return `${this.renderSvgBox(x, y, width, height, background, stroke, 1, bwMode)}${fitSvgImage(barSvg, x + 2, y + 2, Math.max(1, width - 4), Math.max(1, height - 4))}`;
     }
     if (type === 'qrcode') {
       const stroke = escapeXml(style.stroke ?? '#111111');
       const background = escapeXml(style.background ?? '#ffffff');
       const text = boundText || stringValue(item.expression, stringValue(item.bindingField, 'QR'));
       const qrSvg = await this.renderQrCodeSvg(text);
-      return `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${background}" stroke="${stroke}" stroke-width="1"/>${fitSvgImage(qrSvg, x + 2, y + 2, Math.max(1, width - 4), Math.max(1, height - 4))}`;
+      return `${this.renderSvgBox(x, y, width, height, background, stroke, 1, bwMode)}${fitSvgImage(qrSvg, x + 2, y + 2, Math.max(1, width - 4), Math.max(1, height - 4))}`;
     }
     const fontSize = numberValue(style.fontSize, type === 'price' ? 28 : 14);
     const fontWeight = String(style.fontWeight ?? '') === 'bold' ? '700' : '400';
@@ -3673,7 +3744,28 @@ export class LocalCloudController {
     const textNodes = visibleLines.map((line, lineIndex) => (
       `<tspan x="${textX}" dy="${lineIndex === 0 ? 0 : lineHeight}">${escapeXml(line)}</tspan>`
     )).join('');
-    return `<defs><clipPath id="${clipId}"><rect x="${x}" y="${y}" width="${boxWidth}" height="${boxHeight}"/></clipPath></defs><rect x="${x}" y="${y}" width="${boxWidth}" height="${boxHeight}" fill="${background}" stroke="${stroke}" stroke-width="1"/><text clip-path="url(#${clipId})" x="${textX}" y="${y + fontSize}" text-anchor="${textAnchor}" font-size="${fontSize}" font-weight="${fontWeight}" font-family="${SVG_FONT_STACK}" fill="${fill}">${textNodes}</text>`;
+    return `<defs><clipPath id="${clipId}"><rect x="${x}" y="${y}" width="${boxWidth}" height="${boxHeight}"/></clipPath></defs>${this.renderSvgBox(x, y, boxWidth, boxHeight, background, stroke, 1, bwMode)}<text clip-path="url(#${clipId})" x="${textX}" y="${y + fontSize}" text-anchor="${textAnchor}" font-size="${fontSize}" font-weight="${fontWeight}" font-family="${SVG_FONT_STACK}" fill="${fill}">${textNodes}</text>`;
+  }
+
+  private renderSvgBox(x: number, y: number, width: number, height: number, background: unknown, stroke: unknown, strokeWidth = 1, bwMode = false) {
+    const safeStrokeWidth = Math.max(0, numberValue(strokeWidth, 1));
+    const safeWidth = Math.max(0, width);
+    const safeHeight = Math.max(0, height);
+    const effectiveStrokeWidth = bwMode ? Math.max(2, safeStrokeWidth) : safeStrokeWidth;
+    const borderWidth = Math.min(effectiveStrokeWidth, safeWidth / 2);
+    const borderHeight = Math.min(effectiveStrokeWidth, safeHeight / 2);
+    const borderColor = escapeXml(stroke ?? '#111111');
+    return [
+      `<rect x="${x}" y="${y}" width="${safeWidth}" height="${safeHeight}" fill="${escapeXml(background ?? '#ffffff')}" shape-rendering="crispEdges"/>`,
+      effectiveStrokeWidth > 0 && safeWidth > 0 && safeHeight > 0
+        ? [
+          `<rect x="${x}" y="${y}" width="${safeWidth}" height="${borderHeight}" fill="${borderColor}" shape-rendering="crispEdges"/>`,
+          `<rect x="${x}" y="${y + safeHeight - borderHeight}" width="${safeWidth}" height="${borderHeight}" fill="${borderColor}" shape-rendering="crispEdges"/>`,
+          `<rect x="${x}" y="${y}" width="${borderWidth}" height="${safeHeight}" fill="${borderColor}" shape-rendering="crispEdges"/>`,
+          `<rect x="${x + safeWidth - borderWidth}" y="${y}" width="${borderWidth}" height="${safeHeight}" fill="${borderColor}" shape-rendering="crispEdges"/>`,
+        ].join('')
+        : '',
+    ].join('');
   }
 
   private renderBarcodeSvg(text: string, width: number, height: number) {

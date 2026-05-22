@@ -1618,6 +1618,7 @@ export class ApWebsocketService {
     const taskPayload = task.payload && typeof task.payload === 'object' ? task.payload as Record<string, unknown> : {};
     const currentStatus = String(task.status ?? '');
     const currentResultMsg = String(task.resultMsg ?? '');
+    const requireWriteSvcAck = taskPayload.requireWriteSvcAck === true || String(taskPayload.colorMode ?? '').toLowerCase() === 'bw';
     const technical = {
       traceStatus: trace.status,
       replyType: replyType || undefined,
@@ -1640,8 +1641,8 @@ export class ApWebsocketService {
       nextStatus = 'sending';
       resultMsg = '已发送到基站，正在等待价签确认。';
     } else if (trace.status === 'ap_reply_seen' && replyType === 'READ_WRITE_SVC' && cmdType === 'DIS_CONN' && errno === 0 && tasksCount === 0) {
-      nextStatus = 'success';
-      resultMsg = '刷新成功，基站已完成本次下发。';
+      nextStatus = requireWriteSvcAck ? 'sending' : 'success';
+      resultMsg = requireWriteSvcAck ? '基站连接已结束，正在等待价签写屏确认。' : '刷新成功，基站已完成本次下发。';
     } else if (trace.status === 'ap_reply_seen' && replyType === 'READ_WRITE_SVC' && cmdType === 'WRITE_SVC') {
       const ackSendOk = ack === undefined || send === undefined || ack === send;
       if (errno === 0) {
