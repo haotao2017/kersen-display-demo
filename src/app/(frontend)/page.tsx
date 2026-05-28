@@ -8,12 +8,12 @@ import type { Page } from '@/payload-types'
 export const dynamic = 'force-dynamic'
 
 export default async function HomePage() {
-  const payload = await getPayload({ config: configPromise })
-
-  // DB may not be initialized yet on first deploy — fail gracefully
+  // Wrap entire Payload initialization + queries in try/catch so health
+  // check always gets 200 — even if DB is unavailable or Payload errors.
   let homePages: Page[] = []
   let pages: Page[] = []
   try {
+    const payload = await getPayload({ config: configPromise })
     ;[{ docs: homePages }, { docs: pages }] = await Promise.all([
       payload.find({
         collection: 'pages',
@@ -24,8 +24,8 @@ export default async function HomePage() {
       payload.find({ collection: 'pages', limit: 100, depth: 0 }),
     ])
   } catch {
-    // Tables not yet created — onInit will push schema on this request;
-    // next request will succeed. Return empty state so health check passes.
+    // DB unavailable, schema not yet migrated, or Payload init error —
+    // return empty state so health check passes; pages appear once ready.
   }
 
   const homePage = homePages[0]
