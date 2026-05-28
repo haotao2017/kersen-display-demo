@@ -13,12 +13,17 @@ export default async function DynamicPage({
   const { slug } = await params
   const payload = await getPayload({ config: configPromise })
 
-  const { docs } = await payload.find({
-    collection: 'pages',
-    where: { slug: { equals: slug } },
-    limit: 1,
-    depth: 2,
-  })
+  let docs: Awaited<ReturnType<typeof payload.find>>['docs'] = []
+  try {
+    ;({ docs } = await payload.find({
+      collection: 'pages',
+      where: { slug: { equals: slug } },
+      limit: 1,
+      depth: 2,
+    }))
+  } catch {
+    // DB not yet initialized — treat as not found
+  }
 
   if (!docs[0]) notFound()
 

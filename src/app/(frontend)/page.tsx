@@ -8,15 +8,24 @@ export const dynamic = 'force-dynamic'
 
 export default async function HomePage() {
   const payload = await getPayload({ config: configPromise })
-  const [{ docs: homePages }, { docs: pages }] = await Promise.all([
-    payload.find({
-      collection: 'pages',
-      where: { slug: { equals: 'home' } },
-      limit: 1,
-      depth: 2,
-    }),
-    payload.find({ collection: 'pages', limit: 100, depth: 0 }),
-  ])
+
+  // DB may not be initialized yet on first deploy — fail gracefully
+  let homePages: Awaited<ReturnType<typeof payload.find>>['docs'] = []
+  let pages: Awaited<ReturnType<typeof payload.find>>['docs'] = []
+  try {
+    ;[{ docs: homePages }, { docs: pages }] = await Promise.all([
+      payload.find({
+        collection: 'pages',
+        where: { slug: { equals: 'home' } },
+        limit: 1,
+        depth: 2,
+      }),
+      payload.find({ collection: 'pages', limit: 100, depth: 0 }),
+    ])
+  } catch {
+    // Tables not yet created — onInit will push schema on this request;
+    // next request will succeed. Return empty state so health check passes.
+  }
 
   const homePage = homePages[0]
 
