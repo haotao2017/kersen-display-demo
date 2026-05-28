@@ -22,7 +22,12 @@ if (!payloadSecret) {
 const databaseUrl = process.env.DATABASE_URL || process.env.DATABASE_URI
 
 const db = databaseUrl?.startsWith('postgresql') || databaseUrl?.startsWith('postgres')
-  ? postgresAdapter({ pool: { connectionString: databaseUrl } })
+  ? postgresAdapter({
+      pool: { connectionString: databaseUrl },
+      // Auto-push schema on startup — safe for demo/initial deploy;
+      // replace with migrations (payload generate:db-migrations) for production.
+      push: true,
+    })
   : sqliteAdapter({
       client: {
         url: databaseUrl || `file:${path.resolve(dirname, '../payload.db')}`,
