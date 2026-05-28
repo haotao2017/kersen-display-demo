@@ -5,9 +5,9 @@ import { lexicalEditor } from '@payloadcms/richtext-lexical'
 import sharp from 'sharp'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { Users } from './collections/Users'
-import { Media } from './collections/Media'
-import { Pages } from './collections/Pages'
+import { Users } from './collections/Users.ts'
+import { Media } from './collections/Media.ts'
+import { Pages } from './collections/Pages.ts'
 
 const filename = fileURLToPath(import.meta.url)
 const dirname = path.dirname(filename)
@@ -30,22 +30,6 @@ const db = databaseUrl?.startsWith('postgresql') || databaseUrl?.startsWith('pos
     })
 
 export default buildConfig({
-  // On a fresh PostgreSQL deployment (INIT_DB_SCHEMA=true), auto-push the
-  // Drizzle schema so all tables are created before the first request.
-  // pushDevSchema is normally gated to NODE_ENV !== 'production'; calling it
-  // here in onInit bypasses that restriction safely.
-  onInit: async (payload) => {
-    if (process.env.INIT_DB_SCHEMA === 'true' && databaseUrl?.startsWith('postgres')) {
-      payload.logger.info('INIT_DB_SCHEMA: pushing Drizzle schema to database...')
-      try {
-        const { pushDevSchema } = await import('@payloadcms/drizzle')
-        await pushDevSchema(payload.db as Parameters<typeof pushDevSchema>[0])
-        payload.logger.info('INIT_DB_SCHEMA: schema push complete.')
-      } catch (err: unknown) {
-        payload.logger.error({ err }, 'INIT_DB_SCHEMA: schema push failed — continuing anyway')
-      }
-    }
-  },
   admin: {
     user: Users.slug,
     importMap: {

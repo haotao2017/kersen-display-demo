@@ -1,8 +1,8 @@
 import type { CollectionConfig } from 'payload'
-import { HeroBlock } from '../blocks/HeroBlock/config'
-import { RichTextBlock } from '../blocks/RichTextBlock/config'
-import { ImageBlock } from '../blocks/ImageBlock/config'
-import { CTABlock } from '../blocks/CTABlock/config'
+import { HeroBlock } from '../blocks/HeroBlock/config.ts'
+import { RichTextBlock } from '../blocks/RichTextBlock/config.ts'
+import { ImageBlock } from '../blocks/ImageBlock/config.ts'
+import { CTABlock } from '../blocks/CTABlock/config.ts'
 
 const isAuthenticated = ({ req: { user } }: { req: { user?: unknown } }) => Boolean(user)
 
