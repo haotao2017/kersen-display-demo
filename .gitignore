@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+.next.stale*/
+out/
+
+# Database (local dev only — Railway uses DATABASE_URI env var)
+*.db
+*.db-shm
+*.db-wal
+payload.db
+
+# Media uploads (uploaded by Railway app at runtime)
+public/media/
+
+# Environment files — NEVER commit
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Payload auto-generated types
+src/payload-types.ts
+
+# TypeScript build info
+tsconfig.tsbuildinfo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
