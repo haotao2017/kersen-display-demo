@@ -3,6 +3,7 @@ import Link from 'next/link'
 import configPromise from '@payload-config'
 import { getPayload } from 'payload'
 import { BlockRenderer } from '@/components/BlockRenderer'
+import type { Page } from '@/payload-types'
 
 export const dynamic = 'force-dynamic'
 
@@ -10,8 +11,8 @@ export default async function HomePage() {
   const payload = await getPayload({ config: configPromise })
 
   // DB may not be initialized yet on first deploy — fail gracefully
-  let homePages: Awaited<ReturnType<typeof payload.find>>['docs'] = []
-  let pages: Awaited<ReturnType<typeof payload.find>>['docs'] = []
+  let homePages: Page[] = []
+  let pages: Page[] = []
   try {
     ;[{ docs: homePages }, { docs: pages }] = await Promise.all([
       payload.find({

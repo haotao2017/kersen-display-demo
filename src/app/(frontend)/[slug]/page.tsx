@@ -4,6 +4,7 @@ import { notFound } from 'next/navigation'
 import configPromise from '@payload-config'
 import { getPayload } from 'payload'
 import { BlockRenderer } from '@/components/BlockRenderer'
+import type { Page } from '@/payload-types'
 
 export default async function DynamicPage({
   params,
@@ -13,7 +14,7 @@ export default async function DynamicPage({
   const { slug } = await params
   const payload = await getPayload({ config: configPromise })
 
-  let docs: Awaited<ReturnType<typeof payload.find>>['docs'] = []
+  let docs: Page[] = []
   try {
     ;({ docs } = await payload.find({
       collection: 'pages',
