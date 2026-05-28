@@ -22,12 +22,7 @@ if (!payloadSecret) {
 const databaseUrl = process.env.DATABASE_URL || process.env.DATABASE_URI
 
 const db = databaseUrl?.startsWith('postgresql') || databaseUrl?.startsWith('postgres')
-  ? postgresAdapter({
-      pool: { connectionString: databaseUrl },
-      // Auto-push schema on startup — safe for demo/initial deploy;
-      // replace with migrations (payload generate:db-migrations) for production.
-      push: true,
-    })
+  ? postgresAdapter({ pool: { connectionString: databaseUrl } })
   : sqliteAdapter({
       client: {
         url: databaseUrl || `file:${path.resolve(dirname, '../payload.db')}`,
@@ -35,6 +30,22 @@ const db = databaseUrl?.startsWith('postgresql') || databaseUrl?.startsWith('pos
     })
 
 export default buildConfig({
+  // On a fresh PostgreSQL deployment (INIT_DB_SCHEMA=true), auto-push the
+  // Drizzle schema so all tables are created before the first request.
+  // pushDevSchema is normally gated to NODE_ENV !== 'production'; calling it
+  // here in onInit bypasses that restriction safely.
+  onInit: async (payload) => {
+    if (process.env.INIT_DB_SCHEMA === 'true' && databaseUrl?.startsWith('postgres')) {
+      payload.logger.info('INIT_DB_SCHEMA: pushing Drizzle schema to database...')
+      try {
+        const { pushDevSchema } = await import('@payloadcms/drizzle')
+        await pushDevSchema(payload.db as Parameters<typeof pushDevSchema>[0])
+        payload.logger.info('INIT_DB_SCHEMA: schema push complete.')
+      } catch (err: unknown) {
+        payload.logger.error({ err }, 'INIT_DB_SCHEMA: schema push failed — continuing anyway')
+      }
+    }
+  },
   admin: {
     user: Users.slug,
     importMap: {
