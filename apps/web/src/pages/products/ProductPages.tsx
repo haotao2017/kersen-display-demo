@@ -1,10 +1,11 @@
-import { DownOutlined } from '@ant-design/icons';
+import { ApiOutlined, CopyOutlined, DownOutlined } from '@ant-design/icons';
 import { App, Button, Card, Dropdown, Form, Image, Input, InputNumber, Modal, Select, Space, Table, Tag, Upload, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { UploadProps } from 'antd';
 import { api, type ProductRefreshResult, type ProductUpdateResult } from '../../api';
+import { DataHubImportModal } from './DataHubImportModal';
 import { useAppStore } from '../../app/store';
 import { PageHeaderCard } from '../../components/common/PageHeaderCard';
 import { useI18n } from '../../i18n';
@@ -73,6 +74,16 @@ const getVisibleFieldKeys = (detail: Record<string, any> | undefined) => {
   return visible.length ? visible : DEFAULT_CREATE_VISIBLE_FIELDS;
 };
 
+const DEFAULT_PAGE_SIZE = 50;
+
+const fmtDate = (v?: string) => {
+  if (!v) return '-';
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return '-';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
 export const ProductListPage = () => {
   const { tx } = useI18n();
   const { message } = App.useApp();
@@ -81,7 +92,21 @@ export const ProductListPage = () => {
   const currentUser = useAppStore((state) => state.user);
   const isAdmin = currentUser?.role === 'ADMIN';
   const [filters, setFilters] = useState<{ ownerUserId?: string; keyword?: string }>({});
-  const { data, isPending } = useQuery({ queryKey: [...queryKeys.products, filters], queryFn: () => api.products(filters) });
+  const [pagination, setPagination] = useState({ current: 1, pageSize: DEFAULT_PAGE_SIZE });
+  const [sortField, setSortField] = useState<string>('updatedAt');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  const [showImport, setShowImport] = useState(false);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [batchDeleting, setBatchDeleting] = useState(false);
+  const updateFilters = (patch: Partial<typeof filters>) => {
+    setPagination((p) => ({ ...p, current: 1 }));
+    setFilters((current) => ({ ...current, ...patch }));
+  };
+  const { data, isPending } = useQuery({
+    queryKey: [...queryKeys.products, filters, pagination, sortField, sortOrder],
+    queryFn: () => api.products({ ...filters, page: pagination.current, pageSize: pagination.pageSize, sortBy: sortField, sortOrder }),
+    placeholderData: (previous) => previous,
+  });
   const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: () => api.users({ pageSize: 200 }), enabled: isAdmin });
   const userOptions = useMemo(() => (users?.items ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
   const refresh = useMutation({
@@ -119,32 +144,123 @@ export const ProductListPage = () => {
     `This deletes only this data source and clears bindings from ${row.bindDeviceCount ?? 0} display node(s). Display nodes, templates, and task records are kept.`,
   );
 
+  const handleBatchDelete = useCallback(() => {
+    Modal.confirm({
+      title: tx(`确认删除选中的 ${selectedRowKeys.length} 条数据？`, `Delete ${selectedRowKeys.length} selected item(s)?`),
+      content: tx(
+        '此操作不可撤销，同时会解除相关显示节点的绑定。',
+        'This cannot be undone. Bindings to display nodes will also be cleared.',
+      ),
+      okText: tx('删除', 'Delete'),
+      cancelText: tx('取消', 'Cancel'),
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setBatchDeleting(true);
+        let failedCount = 0;
+        for (const id of selectedRowKeys) {
+          try {
+            await api.deleteProduct(id as string);
+          } catch {
+            failedCount++;
+          }
+        }
+        setBatchDeleting(false);
+        setSelectedRowKeys([]);
+        queryClient.invalidateQueries({ queryKey: queryKeys.products });
+        queryClient.invalidateQueries({ queryKey: queryKeys.devices });
+        queryClient.invalidateQueries({ queryKey: queryKeys.tasks });
+        if (failedCount > 0) {
+          message.warning(tx(
+            `操作完成，其中 ${failedCount} 条删除失败`,
+            `Done — ${failedCount} item(s) failed to delete`,
+          ));
+        } else {
+          message.success(tx(
+            `已删除 ${selectedRowKeys.length} 条数据`,
+            `Deleted ${selectedRowKeys.length} item(s)`,
+          ));
+        }
+      },
+    });
+  }, [selectedRowKeys, queryClient, message, tx]);
+
   return (
     <Space direction="vertical" style={{ width: '100%' }} size={16}>
-      <PageHeaderCard title={tx('商品管理', 'Data Source')} extra={<Button type="primary" onClick={() => navigate('/products/create')}>{tx('新增商品', 'New Data Source')}</Button>} />
+      <PageHeaderCard
+        title={tx('商品管理', 'Data Source')}
+        extra={
+          <Space>
+            <Button icon={<ApiOutlined />} onClick={() => setShowImport(true)}>
+              {tx('从 API 获取', 'Fetch from API')}
+            </Button>
+            <Button type="primary" onClick={() => navigate('/products/create')}>
+              {tx('新增商品', 'New Data Source')}
+            </Button>
+          </Space>
+        }
+      />
+      <DataHubImportModal open={showImport} onClose={() => setShowImport(false)} />
       <Card>
-        <Space wrap style={{ marginBottom: 16 }}>
-          {isAdmin ? (
-            <Select
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+          <Space wrap>
+            {isAdmin ? (
+              <Select
+                allowClear
+                placeholder={tx('按用户筛选', 'Filter by user')}
+                style={{ width: 240 }}
+                options={userOptions}
+                value={filters.ownerUserId}
+                onChange={(ownerUserId) => updateFilters({ ownerUserId })}
+              />
+            ) : null}
+            <Input.Search
               allowClear
-              placeholder={tx('按用户筛选', 'Filter by user')}
-              style={{ width: 240 }}
-              options={userOptions}
-              value={filters.ownerUserId}
-              onChange={(ownerUserId) => setFilters((current) => ({ ...current, ownerUserId }))}
+              placeholder={tx('搜索名称/来源编号/参考值', 'Search name/source/reference')}
+              style={{ width: 280 }}
+              onSearch={(keyword) => updateFilters({ keyword: keyword.trim() || undefined })}
             />
-          ) : null}
-          <Input.Search
-            allowClear
-            placeholder={tx('搜索名称/来源编号/参考值', 'Search name/source/reference')}
-            style={{ width: 280 }}
-            onSearch={(keyword) => setFilters((current) => ({ ...current, keyword: keyword.trim() || undefined }))}
-          />
-        </Space>
+          </Space>
+          {selectedRowKeys.length > 0 && (
+            <Button
+              danger
+              loading={batchDeleting}
+              onClick={handleBatchDelete}
+            >
+              {tx(`批量删除 (${selectedRowKeys.length})`, `Delete Selected (${selectedRowKeys.length})`)}
+            </Button>
+          )}
+        </div>
         <Table
           rowKey="id"
           loading={isPending}
           dataSource={data?.items ?? []}
+          pagination={{
+            current: data?.page ?? pagination.current,
+            pageSize: data?.pageSize ?? pagination.pageSize,
+            total: data?.total ?? 0,
+            showSizeChanger: true,
+            pageSizeOptions: [20, 50, 100, 200],
+            showTotal: (total) => tx(`共 ${total} 条`, `${total} total`),
+          }}
+          onChange={(next, _, sorterInfo, extra) => {
+            if (extra?.action === 'sort') {
+              // User clicked a column header — reset to page 1 and apply new sort
+              const s = Array.isArray(sorterInfo) ? sorterInfo[0] : sorterInfo;
+              if (s?.columnKey && s.order) {
+                setSortField(String(s.columnKey));
+                setSortOrder(s.order === 'ascend' ? 'asc' : 'desc');
+              }
+              setPagination(p => ({ ...p, current: 1 }));
+            } else {
+              // User clicked pagination (page number or page size change)
+              setPagination({ current: next.current ?? 1, pageSize: next.pageSize ?? DEFAULT_PAGE_SIZE });
+            }
+            setSelectedRowKeys([]);
+          }}
+          rowSelection={{
+            selectedRowKeys,
+            onChange: (keys) => setSelectedRowKeys(keys),
+          }}
           columns={[
             ...(isAdmin ? [{ title: tx('归属账号', 'Owner'), render: (_: unknown, row: any) => row.owner?.displayName || row.owner?.username || row.ownerUserId || '-' }] : []),
             { title: tx('名称', 'Name'), dataIndex: 'name' },
@@ -154,11 +270,38 @@ export const ProductListPage = () => {
             { title: tx('字段 2', 'Field 2'), dataIndex: 'promotionPrice' },
             { title: tx('模板', 'Template'), render: (_, row: any) => row.defaultTemplate?.name ?? '-' },
             { title: tx('绑定节点数', 'Bound Nodes'), dataIndex: 'bindDeviceCount' },
-            { title: tx('状态', 'Status'), render: (_, row: any) => <Tag color={row.status === 'active' ? 'green' : 'default'}>{row.status}</Tag> },
+            { title: tx('状态', 'Status'), render: (_, row: any) => { const isActive = row.status === 'active' || String(row.status) === '1'; return <Tag color={isActive ? 'green' : 'default'}>{isActive ? 'active' : 'inactive'}</Tag>; } },
+            {
+              title: tx('创建时间', 'Created'),
+              dataIndex: 'createdAt',
+              key: 'createdAt',
+              sorter: true,
+              sortOrder: sortField === 'createdAt' ? (sortOrder === 'desc' ? 'descend' : 'ascend') : null as any,
+              render: (v: string) => fmtDate(v),
+              width: 148,
+            },
+            {
+              title: tx('更新时间', 'Updated'),
+              dataIndex: 'updatedAt',
+              key: 'updatedAt',
+              sorter: true,
+              sortOrder: sortField === 'updatedAt' ? (sortOrder === 'desc' ? 'descend' : 'ascend') : null as any,
+              render: (v: string) => fmtDate(v),
+              width: 148,
+            },
             {
               title: tx('操作', 'Actions'),
               render: (_, row: any) => (
                 <Space>
+                  <Button
+                    icon={<CopyOutlined />}
+                    onClick={() => {
+                      navigator.clipboard.writeText(row.id);
+                      message.success(tx('ID 已复制', 'ID copied'));
+                    }}
+                  >
+                    {tx('复制 ID', 'Copy ID')}
+                  </Button>
                   <Button onClick={() => navigate(`/products/${row.id}`)}>{tx('查看 / 编辑', 'View / Edit')}</Button>
                   <Button onClick={() => refresh.mutate(row.id)} loading={refresh.isPending && refresh.variables === row.id}>{tx('触发刷新', 'Refresh')}</Button>
                   <Button
@@ -221,6 +364,8 @@ export const ProductFormPage = () => {
               `Updated data source and queued ${result.refresh.createdTaskCount} label refresh task(s)`,
             ),
           );
+        } else if (result.refresh.reasonCode === 'no_change') {
+          message.success(tx('数据源已保存（内容无变化，无需重新下发标签）', 'Data source saved — content unchanged, no label refresh needed'));
         } else if (result.refresh.reasonCode === 'no_bound_devices') {
           message.warning(tx('数据源已更新，但当前没有绑定节点，因此未触发刷新', 'Updated data source, but no bound nodes were found, so no refresh task was created'));
         } else if (result.refresh.reasonCode === 'no_template') {
@@ -237,7 +382,10 @@ export const ProductFormPage = () => {
   const uploadImage = useMutation({ mutationFn: api.uploadImage });
 
   useEffect(() => {
-    form.setFieldsValue(detail ?? { status: 'active', price: 0, customFields: {} });
+    const values = detail ?? { status: 'active', price: 0, customFields: {} };
+    const rawStatus = String(values.status ?? '');
+    const normalizedStatus = rawStatus === '1' || rawStatus === 'active' ? 'active' : rawStatus === '0' || rawStatus === 'inactive' ? 'inactive' : 'active';
+    form.setFieldsValue({ ...values, status: normalizedStatus });
   }, [detail, form]);
 
   useEffect(() => {

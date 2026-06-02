@@ -1,7 +1,9 @@
-import { App, Button, Card, Descriptions, Form, Input, Modal, Select, Space, Table, Tag, Typography } from 'antd';
+import { App, Button, Card, Descriptions, Form, Input, Modal, Select, Space, Table, Tag, Typography, Upload } from 'antd';
+import { DownloadOutlined, UploadOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
+import * as XLSX from 'xlsx';
 import { api } from '../../api';
 import { useAppStore } from '../../app/store';
 import { useI18n } from '../../i18n';
@@ -24,6 +26,12 @@ export const EslDeviceListPage = () => {
   const [editForm] = Form.useForm();
   const [bindForm] = Form.useForm();
   const [batchBindForm] = Form.useForm();
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<{
+    success: number; failed: number;
+    errors: Array<{ row: number; eslCode: string; reason: string }>;
+  } | null>(null);
   const [filters, setFilters] = useState<{ storeCode?: string; apId?: string; keyword?: string; ownerUserId?: string }>({});
   const [pagination, setPagination] = useState({ current: 1, pageSize: DEFAULT_PAGE_SIZE });
   const updateFilters = (patch: Partial<typeof filters>) => {
@@ -36,8 +44,8 @@ export const EslDeviceListPage = () => {
     refetchInterval: 30_000,
     placeholderData: (previous) => previous,
   });
-  const { data: products } = useQuery({ queryKey: [...queryKeys.products, 'options'], queryFn: () => api.products({ pageSize: 200 }) });
-  const { data: templates } = useQuery({ queryKey: [...queryKeys.templates, 'options'], queryFn: () => api.templates({ pageSize: 200 }) });
+  const { data: products } = useQuery({ queryKey: [...queryKeys.products, 'options'], queryFn: () => api.products({ pageSize: 2000 }) });
+  const { data: templates } = useQuery({ queryKey: [...queryKeys.templates, 'options'], queryFn: () => api.templates({ pageSize: 2000 }) });
   const { data: aps } = useQuery({ queryKey: [...queryKeys.aps, 'options'], queryFn: () => api.aps({ pageSize: 200 }), refetchInterval: 30_000 });
   const { data: stores } = useQuery({ queryKey: [...queryKeys.stores, 'options'], queryFn: () => api.stores({ pageSize: 200 }), refetchInterval: 60_000 });
   const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: () => api.users({ pageSize: 200 }), enabled: isAdmin });
@@ -142,7 +150,10 @@ export const EslDeviceListPage = () => {
     },
     onError: (error: any) => message.error(error?.response?.data?.message ?? tx('批量删除失败', 'Batch delete failed')),
   });
-  const productOptions = useMemo(() => (products?.items ?? []).map((item: any) => ({ label: item.name, value: item.id })), [products]);
+  const productOptions = useMemo(() => (products?.items ?? []).map((item: any) => ({
+    label: item.sku ? `${item.name}  ·  ${item.sku}` : item.name,
+    value: item.id,
+  })), [products]);
   const templateOptions = useMemo(() => (templates?.items ?? []).map((item: any) => ({ label: item.name, value: item.id })), [templates]);
   const storeOptions = useMemo(() => (stores?.items ?? []).map((item: any) => ({ label: `${item.name} / ${item.code}`, value: item.code })), [stores]);
   const userOptions = useMemo(() => (users?.items ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
@@ -160,6 +171,138 @@ export const EslDeviceListPage = () => {
       `This deletes ${rows.length} display node(s). It only removes node records and clears links to data sources, templates, stations, and tasks. Data sources, templates, and stations are kept. Linked now: ${withProduct} data source(s), ${withTemplate} template(s), ${withAp} station(s).`,
     );
   };
+  // ── Export ──────────────────────────────────────────────────────────────────
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      let rows: any[];
+      if (selectedIds.length > 0) {
+        rows = selectedRows;
+      } else {
+        // Export all devices matching current filters
+        const all = await api.devices({ ...filters, pageSize: 2000 }) as any;
+        rows = all.items ?? [];
+      }
+      const sheetData = rows.map((d: any) => ({
+        'Device Code *': d.eslCode ?? '',
+        'AP Code *':     d.ap?.apCode ?? '',
+        'Device Name':   d.name ?? '',
+        'Data Source ID': d.product?.id ?? '',
+        'Template ID':    d.template?.id ?? '',
+      }));
+      const ws = XLSX.utils.json_to_sheet(sheetData);
+      ws['!cols'] = [20, 20, 24, 30, 30].map(wch => ({ wch }));
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Display Nodes');
+      XLSX.writeFile(wb, `display_nodes_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    } catch (e: any) {
+      message.error(tx('导出失败', 'Export failed') + ': ' + e.message);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // ── Import ──────────────────────────────────────────────────────────────────
+  const handleImport = async (file: File) => {
+    setImporting(true);
+    try {
+      // Parse Excel
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf);
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rawRows = XLSX.utils.sheet_to_json<Record<string, any>>(ws, { defval: '' });
+      if (!rawRows.length) { message.warning(tx('文件中没有数据', 'No data found in file')); return; }
+
+      // Helper: flexible column lookup (exact → case-insensitive partial)
+      const col = (row: Record<string, any>, ...keys: string[]) => {
+        for (const k of keys) {
+          if (row[k] !== undefined && String(row[k]).trim()) return String(row[k]).trim();
+          const found = Object.keys(row).find(rk => rk.toLowerCase().replace(/[* ]/g, '') === k.toLowerCase().replace(/[* ]/g, ''));
+          if (found && String(row[found]).trim()) return String(row[found]).trim();
+        }
+        return '';
+      };
+
+      // Load reference data for lookups
+      const [apsData, prodsData, tmplData, devsData] = await Promise.all([
+        api.aps({ pageSize: 2000 }) as any,
+        api.products({ pageSize: 2000 }) as any,
+        api.templates({ pageSize: 2000 }) as any,
+        api.devices({ pageSize: 2000 }) as any,
+      ]);
+
+      const apByCode  = new Map<string, any>((apsData.items ?? []).map((a: any) => [String(a.apCode ?? '').toLowerCase().trim(), a]));
+      const apByName  = new Map<string, any>((apsData.items ?? []).map((a: any) => [String(a.name  ?? '').toLowerCase().trim(), a]));
+      const prodById  = new Map<string, any>((prodsData.items ?? []).map((p: any) => [String(p.id ?? '').trim(), p]));
+      const tmplById  = new Map<string, any>((tmplData.items  ?? []).map((t: any) => [String(t.id ?? '').trim(), t]));
+      const devByCode = new Map<string, any>((devsData.items  ?? []).map((d: any) => [String(d.eslCode ?? '').toLowerCase().trim(), d]));
+
+      let success = 0, failed = 0;
+      const errors: Array<{ row: number; eslCode: string; reason: string }> = [];
+
+      for (let i = 0; i < rawRows.length; i++) {
+        const row = rawRows[i];
+        const eslCode  = col(row, 'Device Code *', 'DeviceCode*', 'eslCode', '设备编号');
+        const apCode   = col(row, 'AP Code *', 'APCode*', 'apCode', '所属基站编号');
+        const devName  = col(row, 'Device Name', 'deviceName', '设备名称');
+        const prodId = col(row, 'Data Source ID', 'DataSourceID', '数据源ID');
+        const tmplId = col(row, 'Template ID', 'TemplateID', '模板ID');
+
+        if (!eslCode) {
+          failed++;
+          errors.push({ row: i + 2, eslCode: '-', reason: tx('缺少设备编号', 'Missing device code') });
+          continue;
+        }
+
+        try {
+          // Resolve AP (warn but don't block if missing)
+          const ap = apByCode.get(apCode.toLowerCase()) ?? apByName.get(apCode.toLowerCase()) ?? null;
+          if (apCode && !ap) {
+            errors.push({ row: i + 2, eslCode, reason: tx(`基站 "${apCode}" 不存在，已忽略基站绑定`, `AP "${apCode}" not found, AP binding skipped`) });
+          }
+
+          // Create or update device (ownership follows the current logged-in user automatically)
+          const existing = devByCode.get(eslCode.toLowerCase());
+          let deviceId: string;
+          if (existing) {
+            await api.updateDevice(existing.id, {
+              eslCode: existing.eslCode,
+              name: devName || existing.name || eslCode,
+              apId: ap ? ap.id : (existing.apId ?? null),
+            });
+            deviceId = existing.id;
+          } else {
+            const created = await api.createDevice({ eslCode, name: devName || eslCode, apId: ap?.id }) as any;
+            deviceId = created.id;
+            devByCode.set(eslCode.toLowerCase(), created);
+          }
+
+          // Match strictly by ID only
+          const product  = prodId ? prodById.get(prodId) ?? null : null;
+          const template = tmplId ? tmplById.get(tmplId) ?? null : null;
+
+          if (product) {
+            // autoRefresh: false — import never triggers a label push
+            await api.bindDevice(deviceId, { productId: product.id, templateId: template?.id, autoRefresh: false });
+          }
+
+          success++;
+        } catch (e: any) {
+          failed++;
+          errors.push({ row: i + 2, eslCode, reason: e?.response?.data?.message ?? e.message ?? 'Unknown error' });
+        }
+      }
+
+      queryClient.invalidateQueries({ queryKey: queryKeys.devices });
+      setImportResult({ success, failed, errors });
+    } catch (e: any) {
+      message.error(tx('导入失败', 'Import failed') + ': ' + e.message);
+    } finally {
+      setImporting(false);
+    }
+    return false; // prevent antd Upload auto-upload
+  };
+
   const ownerColumn = isAdmin ? {
     title: tx('归属账号', 'Owner'),
     render: (_: unknown, row: any) => row.owner?.displayName || row.owner?.username || row.ownerUserId || '-',
@@ -203,6 +346,24 @@ export const EslDeviceListPage = () => {
           <Button disabled={!selectedIds.length} onClick={() => setBatchBindOpen(true)}>
             {tx('批量绑定', 'Batch Bind')}
           </Button>
+          <Button
+            icon={<DownloadOutlined />}
+            loading={exporting}
+            onClick={handleExport}
+          >
+            {selectedIds.length
+              ? tx(`导出选中 (${selectedIds.length})`, `Export Selected (${selectedIds.length})`)
+              : tx('导出全部', 'Export All')}
+          </Button>
+          <Upload
+            accept=".xlsx,.xls"
+            showUploadList={false}
+            beforeUpload={(file) => { handleImport(file); return false; }}
+          >
+            <Button icon={<UploadOutlined />} loading={importing}>
+              {tx('导入', 'Import')}
+            </Button>
+          </Upload>
           <Button
             disabled={!selectedIds.length}
             onClick={() => {
@@ -360,8 +521,12 @@ export const EslDeviceListPage = () => {
           <Form.Item name="name" label={tx('设备名称', 'Device Name')} rules={[{ required: true, message: tx('请输入设备名称', 'Enter device name') }]}><Input /></Form.Item>
           <Form.Item name="eslCode" label={tx('显示节点码', 'Display Node Code')} rules={[{ required: true, message: tx('请输入显示节点码', 'Enter display node code') }]}><Input /></Form.Item>
           <Form.Item name="apId" label={tx('所属 AP', 'AP')}><Select allowClear options={apOptions} /></Form.Item>
-          <Form.Item name="productId" label={tx('数据源', 'Data Source')}><Select allowClear options={productOptions} /></Form.Item>
-          <Form.Item name="templateId" label={tx('模板', 'Template')}><Select allowClear options={templateOptions} /></Form.Item>
+          <Form.Item name="productId" label={tx('数据源', 'Data Source')}>
+            <Select allowClear showSearch optionFilterProp="label" placeholder={tx('搜索名称或 SKU', 'Search by name or SKU')} options={productOptions} />
+          </Form.Item>
+          <Form.Item name="templateId" label={tx('模板', 'Template')}>
+            <Select allowClear showSearch optionFilterProp="label" placeholder={tx('搜索模板名称', 'Search template name')} options={templateOptions} />
+          </Form.Item>
         </Form>
       </Modal>
       <Modal open={Boolean(bindTarget)} title={bindTarget ? `${tx('绑定设备', 'Bind Device')} · ${bindTarget.eslCode}` : tx('绑定设备', 'Bind Device')} onCancel={() => setBindTarget(null)} onOk={() => bindForm.submit()} confirmLoading={bind.isPending}>
@@ -373,8 +538,12 @@ export const EslDeviceListPage = () => {
             bind.mutate({ id: bindTarget.id, values });
           }}
         >
-          <Form.Item name="productId" label={tx('数据源', 'Data Source')} rules={[{ required: true, message: tx('请选择数据源', 'Select a data source') }]}><Select options={productOptions} /></Form.Item>
-          <Form.Item name="templateId" label={tx('模板', 'Template')}><Select allowClear options={templateOptions} /></Form.Item>
+          <Form.Item name="productId" label={tx('数据源', 'Data Source')} rules={[{ required: true, message: tx('请选择数据源', 'Select a data source') }]}>
+            <Select showSearch optionFilterProp="label" placeholder={tx('搜索名称或 SKU', 'Search by name or SKU')} options={productOptions} />
+          </Form.Item>
+          <Form.Item name="templateId" label={tx('模板', 'Template')}>
+            <Select allowClear showSearch optionFilterProp="label" placeholder={tx('搜索模板名称', 'Search template name')} options={templateOptions} />
+          </Form.Item>
         </Form>
       </Modal>
       <Modal open={batchBindOpen} title={tx('批量绑定显示节点', 'Batch Bind Display Nodes')} onCancel={() => setBatchBindOpen(false)} onOk={() => batchBindForm.submit()} confirmLoading={batchBind.isPending}>
@@ -387,12 +556,52 @@ export const EslDeviceListPage = () => {
             {tx(`将更新 ${selectedIds.length} 个显示节点。可以只选模板、只选商品，或同时选择。`, `This updates ${selectedIds.length} display node(s). You can select only a template, only a data source, or both.`)}
           </Typography.Paragraph>
           <Form.Item name="productId" label={tx('数据源', 'Data Source')}>
-            <Select allowClear options={productOptions} />
+            <Select allowClear showSearch optionFilterProp="label" placeholder={tx('搜索名称或 SKU', 'Search by name or SKU')} options={productOptions} />
           </Form.Item>
           <Form.Item name="templateId" label={tx('模板', 'Template')}>
-            <Select allowClear options={templateOptions} />
+            <Select allowClear showSearch optionFilterProp="label" placeholder={tx('搜索模板名称', 'Search template name')} options={templateOptions} />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* ── Import Result Modal ── */}
+      <Modal
+        open={Boolean(importResult)}
+        title={importResult
+          ? tx(`导入完成：成功 ${importResult.success} 条，失败 ${importResult.failed} 条`,
+              `Import done: ${importResult.success} succeeded · ${importResult.failed} failed`)
+          : ''}
+        onCancel={() => setImportResult(null)}
+        footer={<Button type="primary" onClick={() => setImportResult(null)}>{tx('关闭', 'Close')}</Button>}
+        width={680}
+      >
+        {importResult && (
+          <>
+            {importResult.failed === 0 ? (
+              <Typography.Text type="success">
+                {tx(`全部 ${importResult.success} 条数据导入成功`, `All ${importResult.success} rows imported successfully`)}
+              </Typography.Text>
+            ) : (
+              <Typography.Text type="warning">
+                {tx(`${importResult.success} 条成功，${importResult.failed} 条失败`, `${importResult.success} succeeded, ${importResult.failed} failed`)}
+              </Typography.Text>
+            )}
+            {importResult.errors.length > 0 && (
+              <Table
+                style={{ marginTop: 12 }}
+                size="small"
+                pagination={false}
+                scroll={{ y: 300 }}
+                dataSource={importResult.errors.map((e, i) => ({ ...e, key: i }))}
+                columns={[
+                  { title: tx('行号', 'Row'), dataIndex: 'row', width: 60 },
+                  { title: tx('设备编号', 'Device Code'), dataIndex: 'eslCode', width: 140 },
+                  { title: tx('原因', 'Reason'), dataIndex: 'reason', ellipsis: true },
+                ]}
+              />
+            )}
+          </>
+        )}
       </Modal>
     </Space>
   );

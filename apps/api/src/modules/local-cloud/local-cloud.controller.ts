@@ -152,7 +152,7 @@ const LABEL_PREFIX_PRESET_KEYS: Array<{ prefix: string; key: string }> = [
 
 function paginationParams(query?: Row) {
   const page = Math.max(1, Math.floor(numberValue(query?.page, 1)));
-  const pageSize = Math.max(1, Math.min(200, Math.floor(numberValue(query?.pageSize, 50))));
+  const pageSize = Math.max(1, Math.min(2000, Math.floor(numberValue(query?.pageSize, 50))));
   return {
     page,
     pageSize,
@@ -199,6 +199,13 @@ function normalizeMacValue(value?: unknown) {
     return raw;
   }
   return hex.match(/.{1,2}/g)?.join(':') ?? raw;
+}
+
+function normalizeProductStatus(value: unknown): 'active' | 'inactive' {
+  const s = String(value ?? '').trim();
+  if (s === '1' || s.toLowerCase() === 'active') return 'active';
+  if (s === '0' || s.toLowerCase() === 'inactive') return 'inactive';
+  return 'active';
 }
 
 function numberValue(value: unknown, fallback = 0) {
@@ -698,7 +705,15 @@ export class LocalCloudController {
 
   @Get('products')
   products(@Query() query: Row, @Req() request: Request) {
-    return paginate(this.filterRowsByOwnerAndKeyword(this.localProducts(request), query, ['name', 'sku', 'barcode', 'status']), query);
+    const items = this.filterRowsByOwnerAndKeyword(this.localProducts(request), query, ['name', 'sku', 'barcode', 'status']);
+    const sortBy  = stringValue(query.sortBy,    'updatedAt');
+    const sortDir = stringValue(query.sortOrder, 'desc');
+    items.sort((a: any, b: any) => {
+      const av = String(a[sortBy] ?? '');
+      const bv = String(b[sortBy] ?? '');
+      return sortDir === 'desc' ? bv.localeCompare(av) : av.localeCompare(bv);
+    });
+    return paginate(items, query);
   }
 
   @Post('products')
@@ -740,11 +755,47 @@ export class LocalCloudController {
   async updateProduct(@Param('productId') productId: string, @Body() body: Row, @Req() request: Request) {
     const current = this.assertRowVisible(this.findProduct(productId), request, 'Product not found');
     const product = this.upsertProduct({ ...current, ...body, id: productId });
-    const refresh = this.refreshLinkedProductDevices(productId, 'product_update_refresh', request);
+    // Only trigger label refresh when display-relevant content actually changed
+    const dataChanged = this.productContentChanged(current as Row, product as Row);
+    const refresh = dataChanged
+      ? this.refreshLinkedProductDevices(productId, 'product_update_refresh', request)
+      : {
+          attempted: false,
+          boundDeviceCount: 0,
+          refreshableDeviceCount: 0,
+          skippedDeviceCount: 0,
+          createdTaskCount: 0,
+          taskIds: [] as string[],
+          reasonCode: 'no_change' as const,
+          message: '数据内容无变化，跳过标签刷新',
+        };
     return {
       ...product,
       refresh,
     };
+  }
+
+  /** Returns true when any display-relevant product field has changed value. */
+  private productContentChanged(before: Row, after: Row): boolean {
+    const SCALAR_FIELDS = [
+      'name', 'sku', 'barcode', 'price', 'originalPrice', 'memberPrice',
+      'promotionPrice', 'promotionText', 'imageUrl', 'status', 'defaultTemplateId',
+    ];
+    for (const f of SCALAR_FIELDS) {
+      const bv = before[f] == null ? '' : String(before[f]);
+      const av = after[f] == null ? '' : String(after[f]);
+      if (bv !== av) return true;
+    }
+    // Deep-compare customFields (flat key→value object)
+    const bCF = (before.customFields as Record<string, unknown>) ?? {};
+    const aCF = (after.customFields as Record<string, unknown>) ?? {};
+    const allKeys = new Set([...Object.keys(bCF), ...Object.keys(aCF)]);
+    for (const k of allKeys) {
+      const bv = bCF[k] == null ? '' : String(bCF[k]);
+      const av = aCF[k] == null ? '' : String(aCF[k]);
+      if (bv !== av) return true;
+    }
+    return false;
   }
 
   @Get('products/:productId/delete-impact')
@@ -1090,7 +1141,8 @@ export class LocalCloudController {
     label.updatedAt = now();
     this.db.labels.set(label.id, label);
     this.db.save();
-    const task = body.autoRefresh === false ? null : await this.createRefreshTask(label.id, 'bind_refresh');
+    const productActive = normalizeProductStatus(product.status) === 'active';
+    const task = body.autoRefresh === false || !productActive ? null : await this.createRefreshTask(label.id, 'bind_refresh');
     return { ...this.localDevice(label, true, request), recentTasks: task ? [this.localTask(task, false)] : [] };
   }
 
@@ -1701,7 +1753,7 @@ export class LocalCloudController {
       imageUrl: input.imageUrl,
       customFields: input.customFields ?? {},
       defaultTemplateId: input.defaultTemplateId,
-      status: input.status ?? 'active',
+      status: normalizeProductStatus(input.status),
       ownerUserId: input.ownerUserId,
       storeCode: input.storeCode,
       createdAt: stringValue(input.createdAt, timestamp),

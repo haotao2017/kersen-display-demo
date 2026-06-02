@@ -8,7 +8,7 @@ export interface RefreshLinkedResult {
   skippedDeviceCount: number;
   createdTaskCount: number;
   taskIds: string[];
-  reasonCode: 'no_bound_devices' | 'no_template' | null;
+  reasonCode: 'no_bound_devices' | 'no_template' | 'no_change' | null;
   message: string;
 }
 
@@ -21,7 +21,7 @@ export interface ProductRefreshResult {
   taskIds: string[];
   boundDeviceCount: number;
   skippedDeviceCount: number;
-  reasonCode: 'no_bound_devices' | 'no_template' | null;
+  reasonCode: 'no_bound_devices' | 'no_template' | 'no_change' | null;
 }
 
 export const api = {

@@ -987,6 +987,15 @@ export const TemplateListPage = () => {
               title: tx('操作', 'Actions'),
               render: (_, row: any) => (
                 <Space>
+                  <Button
+                    icon={<CopyOutlined />}
+                    onClick={() => {
+                      navigator.clipboard.writeText(row.id);
+                      modal.success({ title: tx('ID 已复制', 'ID copied'), content: row.id, width: 480 });
+                    }}
+                  >
+                    {tx('复制 ID', 'Copy ID')}
+                  </Button>
                   <Button onClick={() => navigate(`/templates/${row.id}/designer`)}>{tx('设计', 'Design')}</Button>
                   <Button onClick={() => publish.mutate(row.id)} loading={publish.isPending && publish.variables === row.id}>{tx('发布', 'Publish')}</Button>
                   <Button
