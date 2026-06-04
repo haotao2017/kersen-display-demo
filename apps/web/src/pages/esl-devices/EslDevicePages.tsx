@@ -1,5 +1,5 @@
-import { App, Button, Card, Descriptions, Form, Input, Modal, Select, Space, Table, Tag, Typography, Upload } from 'antd';
-import { DownloadOutlined, UploadOutlined } from '@ant-design/icons';
+import { App, Button, Card, Descriptions, Form, Input, Modal, Segmented, Select, Space, Table, Tag, Typography, Upload } from 'antd';
+import { DownloadOutlined, FileExcelOutlined, UploadOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
@@ -32,11 +32,23 @@ export const EslDeviceListPage = () => {
     success: number; failed: number;
     errors: Array<{ row: number; eslCode: string; reason: string }>;
   } | null>(null);
-  const [filters, setFilters] = useState<{ storeCode?: string; apId?: string; keyword?: string; ownerUserId?: string }>({});
+  const [filters, setFilters] = useState<{ storeCode?: string; apId?: string; keyword?: string; ownerUserId?: string; group?: string }>({});
+  // 合并后的单一筛选：先选筛选字段，再选/输入对应的值
+  type FilterField = 'keyword' | 'storeCode' | 'apId' | 'group' | 'ownerUserId';
+  const [filterField, setFilterField] = useState<FilterField>('keyword');
   const [pagination, setPagination] = useState({ current: 1, pageSize: DEFAULT_PAGE_SIZE });
-  const updateFilters = (patch: Partial<typeof filters>) => {
+  // 切换筛选字段时清空已有筛选，保证“选哪个就只按哪个字段筛”
+  const changeFilterField = (field: FilterField) => {
+    setFilterField(field);
     setPagination((current) => ({ ...current, current: 1 }));
-    setFilters((current) => ({ ...current, ...patch }));
+    setSelectedRowKeys([]);
+    setFilters({});
+  };
+  // 设置当前筛选字段的值（单一维度筛选）
+  const setFilterValue = (value?: string) => {
+    setPagination((current) => ({ ...current, current: 1 }));
+    setSelectedRowKeys([]);
+    setFilters(value ? { [filterField]: value } : {});
   };
   const { data, isPending } = useQuery({
     queryKey: [...queryKeys.devices, filters, pagination],
@@ -49,6 +61,7 @@ export const EslDeviceListPage = () => {
   const { data: aps } = useQuery({ queryKey: [...queryKeys.aps, 'options'], queryFn: () => api.aps({ pageSize: 200 }), refetchInterval: 30_000 });
   const { data: stores } = useQuery({ queryKey: [...queryKeys.stores, 'options'], queryFn: () => api.stores({ pageSize: 200 }), refetchInterval: 60_000 });
   const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: () => api.users({ pageSize: 200 }), enabled: isAdmin });
+  const { data: groups } = useQuery({ queryKey: [...queryKeys.devices, 'groups'], queryFn: () => api.deviceGroups(), refetchInterval: 60_000 });
   const create = useMutation({
     mutationFn: api.createDevice,
     onSuccess: () => {
@@ -64,7 +77,7 @@ export const EslDeviceListPage = () => {
       values,
     }: {
       id: string;
-      values: { eslCode: string; name: string; apId?: string; productId?: string; templateId?: string };
+      values: { eslCode: string; name: string; apId?: string; productId?: string; templateId?: string; group?: string };
     }) => api.updateDevice(id, values),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.devices });
@@ -157,6 +170,7 @@ export const EslDeviceListPage = () => {
   const templateOptions = useMemo(() => (templates?.items ?? []).map((item: any) => ({ label: item.name, value: item.id })), [templates]);
   const storeOptions = useMemo(() => (stores?.items ?? []).map((item: any) => ({ label: `${item.name} / ${item.code}`, value: item.code })), [stores]);
   const userOptions = useMemo(() => (users?.items ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
+  const groupOptions = useMemo(() => (groups?.items ?? []).map((g) => ({ label: g, value: g })), [groups]);
   const apOptions = useMemo(() => (aps?.items ?? [])
     .filter((item: any) => !filters.storeCode || item.storeCode === filters.storeCode)
     .map((item: any) => ({ label: `${item.storeName ?? item.storeCode} / ${item.apCode} / ${item.name}`, value: item.id })), [aps, filters.storeCode]);
@@ -187,11 +201,12 @@ export const EslDeviceListPage = () => {
         'Device Code *': d.eslCode ?? '',
         'AP Code *':     d.ap?.apCode ?? '',
         'Device Name':   d.name ?? '',
+        '分组 Group':     d.group ?? '',
         'Data Source ID': d.product?.id ?? '',
         'Template ID':    d.template?.id ?? '',
       }));
       const ws = XLSX.utils.json_to_sheet(sheetData);
-      ws['!cols'] = [20, 20, 24, 30, 30].map(wch => ({ wch }));
+      ws['!cols'] = [20, 20, 24, 14, 30, 30].map(wch => ({ wch }));
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Display Nodes');
       XLSX.writeFile(wb, `display_nodes_${new Date().toISOString().slice(0, 10)}.xlsx`);
@@ -200,6 +215,23 @@ export const EslDeviceListPage = () => {
     } finally {
       setExporting(false);
     }
+  };
+
+  // ── Template download ─────────────────────────────────────────────────────
+  const handleDownloadTemplate = () => {
+    const example = [{
+      'Device Code *': 'ESL000001',
+      'AP Code *':     'AP-01',
+      'Device Name':   tx('示例节点（可留空）', 'Sample node (optional)'),
+      '分组 Group':     tx('超市', 'Store-A'),
+      'Data Source ID': '',
+      'Template ID':    '',
+    }];
+    const ws = XLSX.utils.json_to_sheet(example);
+    ws['!cols'] = [20, 20, 24, 14, 30, 30].map(wch => ({ wch }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Display Nodes');
+    XLSX.writeFile(wb, 'display_nodes_template.xlsx');
   };
 
   // ── Import ──────────────────────────────────────────────────────────────────
@@ -245,6 +277,7 @@ export const EslDeviceListPage = () => {
         const eslCode  = col(row, 'Device Code *', 'DeviceCode*', 'eslCode', '设备编号');
         const apCode   = col(row, 'AP Code *', 'APCode*', 'apCode', '所属基站编号');
         const devName  = col(row, 'Device Name', 'deviceName', '设备名称');
+        const group    = col(row, '分组 Group', 'Group', '分组', 'group').slice(0, 10);
         const prodId = col(row, 'Data Source ID', 'DataSourceID', '数据源ID');
         const tmplId = col(row, 'Template ID', 'TemplateID', '模板ID');
 
@@ -269,10 +302,12 @@ export const EslDeviceListPage = () => {
               eslCode: existing.eslCode,
               name: devName || existing.name || eslCode,
               apId: ap ? ap.id : (existing.apId ?? null),
+              // 仅在填写了分组时更新，留空则保留原有分组
+              ...(group ? { group } : {}),
             });
             deviceId = existing.id;
           } else {
-            const created = await api.createDevice({ eslCode, name: devName || eslCode, apId: ap?.id }) as any;
+            const created = await api.createDevice({ eslCode, name: devName || eslCode, apId: ap?.id, ...(group ? { group } : {}) }) as any;
             deviceId = created.id;
             devByCode.set(eslCode.toLowerCase(), created);
           }
@@ -311,38 +346,64 @@ export const EslDeviceListPage = () => {
     <Space direction="vertical" style={{ width: '100%' }}>
       <Card title={tx('显示节点', 'Display Nodes')} extra={<Button type="primary" onClick={() => setCreateOpen(true)}>{tx('手动添加节点', 'Add Display Node')}</Button>}>
         <Space wrap style={{ marginBottom: 16 }}>
-          <Select
-            allowClear
-            placeholder={tx('按门店筛选', 'Filter by store')}
-            style={{ width: 220 }}
-            options={storeOptions}
-            value={filters.storeCode}
-            onChange={(storeCode) => updateFilters({ storeCode, apId: undefined })}
+          {/* 合并后的统一筛选：先选筛选字段，再选/输入对应的值 */}
+          <Segmented
+            value={filterField}
+            onChange={(value) => changeFilterField(value as FilterField)}
+            options={[
+              { label: tx('关键词', 'Keyword'), value: 'keyword' },
+              { label: tx('门店', 'Store'), value: 'storeCode' },
+              { label: tx('基站', 'AP'), value: 'apId' },
+              { label: tx('分组', 'Group'), value: 'group' },
+              ...(isAdmin ? [{ label: tx('归属账号', 'Owner'), value: 'ownerUserId' }] : []),
+            ]}
           />
-          <Select
-            allowClear
-            placeholder={tx('按基站筛选', 'Filter by AP')}
-            style={{ width: 260 }}
-            options={apOptions}
-            value={filters.apId}
-            onChange={(apId) => updateFilters({ apId })}
-          />
-          {isAdmin ? (
-            <Select
+          {filterField === 'keyword' ? (
+            <Input.Search
               allowClear
-              placeholder={tx('按用户筛选', 'Filter by user')}
+              placeholder={tx('搜索标签码/名称', 'Search label code/name')}
+              style={{ width: 280 }}
+              defaultValue={filters.keyword}
+              onSearch={(keyword) => setFilterValue(keyword.trim() || undefined)}
+            />
+          ) : filterField === 'storeCode' ? (
+            <Select
+              allowClear showSearch optionFilterProp="label"
+              placeholder={tx('按门店筛选', 'Filter by store')}
+              style={{ width: 280 }}
+              options={storeOptions}
+              value={filters.storeCode}
+              onChange={(value) => setFilterValue(value)}
+            />
+          ) : filterField === 'apId' ? (
+            <Select
+              allowClear showSearch optionFilterProp="label"
+              placeholder={tx('按基站筛选', 'Filter by AP')}
+              style={{ width: 300 }}
+              options={apOptions}
+              value={filters.apId}
+              onChange={(value) => setFilterValue(value)}
+            />
+          ) : filterField === 'group' ? (
+            <Select
+              allowClear showSearch optionFilterProp="label"
+              placeholder={tx('按分组筛选', 'Filter by group')}
               style={{ width: 240 }}
+              options={groupOptions}
+              value={filters.group}
+              onChange={(value) => setFilterValue(value)}
+              notFoundContent={tx('暂无分组', 'No groups yet')}
+            />
+          ) : (
+            <Select
+              allowClear showSearch optionFilterProp="label"
+              placeholder={tx('按用户筛选', 'Filter by user')}
+              style={{ width: 260 }}
               options={userOptions}
               value={filters.ownerUserId}
-              onChange={(ownerUserId) => updateFilters({ ownerUserId })}
+              onChange={(value) => setFilterValue(value)}
             />
-          ) : null}
-          <Input.Search
-            allowClear
-            placeholder={tx('搜索标签码/名称', 'Search label code/name')}
-            style={{ width: 260 }}
-            onSearch={(keyword) => updateFilters({ keyword: keyword.trim() || undefined })}
-          />
+          )}
           <Button disabled={!selectedIds.length} onClick={() => setBatchBindOpen(true)}>
             {tx('批量绑定', 'Batch Bind')}
           </Button>
@@ -354,6 +415,9 @@ export const EslDeviceListPage = () => {
             {selectedIds.length
               ? tx(`导出选中 (${selectedIds.length})`, `Export Selected (${selectedIds.length})`)
               : tx('导出全部', 'Export All')}
+          </Button>
+          <Button icon={<FileExcelOutlined />} onClick={handleDownloadTemplate}>
+            {tx('下载模板', 'Template')}
           </Button>
           <Upload
             accept=".xlsx,.xls"
@@ -428,6 +492,11 @@ export const EslDeviceListPage = () => {
             { title: tx('门店', 'Store'), render: (_, row: any) => row.ap?.storeName ?? row.storeCode ?? '-' },
             { title: 'AP', render: (_, row: any) => row.ap?.name ?? row.ap?.apCode ?? '-' },
             {
+              title: tx('分组', 'Group'),
+              dataIndex: 'group',
+              render: (_, row: any) => (row.group ? <Tag color="blue">{row.group}</Tag> : <Typography.Text type="secondary">-</Typography.Text>),
+            },
+            {
               title: tx('绑定状态', 'Binding'),
               render: (_, row: any) => <Tag color={row.bindStatus === 'bound' || row.productId || row.templateId ? 'green' : 'default'}>{row.bindStatus === 'bound' || row.productId || row.templateId ? tx('已绑定', 'Bound') : tx('未绑定', 'Unbound')}</Tag>,
             },
@@ -447,6 +516,7 @@ export const EslDeviceListPage = () => {
                           eslCode: row.eslCode,
                           name: row.name ?? '',
                           apId: row.apId ?? undefined,
+                          group: row.group ?? '',
                           productId: row.productId ?? undefined,
                           templateId: row.templateId ?? undefined,
                         });
@@ -507,6 +577,13 @@ export const EslDeviceListPage = () => {
           <Form.Item name="name" label={tx('设备名称', 'Device Name')} rules={[{ required: true, message: tx('请输入设备名称', 'Enter device name') }]}><Input /></Form.Item>
           <Form.Item name="eslCode" label={tx('显示节点码', 'Display Node Code')} rules={[{ required: true, message: tx('请输入显示节点码', 'Enter display node code') }]}><Input /></Form.Item>
           <Form.Item name="apId" label={tx('所属 AP', 'AP')}><Select allowClear options={apOptions} /></Form.Item>
+          <Form.Item
+            name="group"
+            label={tx('分组', 'Group')}
+            rules={[{ max: 10, message: tx('分组不能超过 10 个字', 'Group must be 10 characters or fewer') }]}
+          >
+            <Input allowClear maxLength={10} showCount placeholder={tx('如：超市、库房（可留空）', 'e.g. Store, Warehouse (optional)')} />
+          </Form.Item>
         </Form>
       </Modal>
       <Modal open={Boolean(editTarget)} title={editTarget ? `${tx('编辑显示节点', 'Edit Display Node')} · ${editTarget.eslCode}` : tx('编辑显示节点', 'Edit Display Node')} onCancel={() => setEditTarget(null)} onOk={() => editForm.submit()} confirmLoading={update.isPending}>
@@ -521,6 +598,13 @@ export const EslDeviceListPage = () => {
           <Form.Item name="name" label={tx('设备名称', 'Device Name')} rules={[{ required: true, message: tx('请输入设备名称', 'Enter device name') }]}><Input /></Form.Item>
           <Form.Item name="eslCode" label={tx('显示节点码', 'Display Node Code')} rules={[{ required: true, message: tx('请输入显示节点码', 'Enter display node code') }]}><Input /></Form.Item>
           <Form.Item name="apId" label={tx('所属 AP', 'AP')}><Select allowClear options={apOptions} /></Form.Item>
+          <Form.Item
+            name="group"
+            label={tx('分组', 'Group')}
+            rules={[{ max: 10, message: tx('分组不能超过 10 个字', 'Group must be 10 characters or fewer') }]}
+          >
+            <Input allowClear maxLength={10} showCount placeholder={tx('如：超市、库房（可留空）', 'e.g. Store, Warehouse (optional)')} />
+          </Form.Item>
           <Form.Item name="productId" label={tx('数据源', 'Data Source')}>
             <Select allowClear showSearch optionFilterProp="label" placeholder={tx('搜索名称或 SKU', 'Search by name or SKU')} options={productOptions} />
           </Form.Item>

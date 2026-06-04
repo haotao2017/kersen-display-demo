@@ -242,6 +242,7 @@ export interface EslDevice {
   apId?: string;
   productId?: string;
   templateId?: string;
+  group?: string;
   deviceType: string;
   screenWidth: number;
   screenHeight: number;

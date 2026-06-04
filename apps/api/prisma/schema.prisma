@@ -68,6 +68,7 @@ model Label {
   productId String?
   templateId String?
   deviceType String?
+  groupName String?
   screenWidth Int?
   screenHeight Int?
   updatedAt DateTime @default(now())

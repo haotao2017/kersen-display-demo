@@ -93,6 +93,11 @@ type SilentWakeResult = {
 };
 
 const now = () => new Date().toISOString();
+// 显示节点分组：去空格，最长 10 个字符（不允许超过 10 个字）
+const normalizeGroup = (value: unknown): string | undefined => {
+  const text = String(value ?? '').trim();
+  return text ? text.slice(0, 10) : undefined;
+};
 const id = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const getUploadDir = () => process.env.UPLOAD_DIR || join(process.cwd(), 'uploads');
@@ -464,6 +469,7 @@ export class LocalCloudController {
   private readonly deferredRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly labelOfflineProbeTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private labelKeepaliveTimer?: ReturnType<typeof setInterval>;
+  private taskCleanupTimer?: ReturnType<typeof setInterval>;
 
   constructor(
     private readonly db: MemoryStore,
@@ -481,6 +487,7 @@ export class LocalCloudController {
       void this.recoverQueuedRefreshTasks();
       this.startQueuedTaskReconciler();
       this.startLabelKeepaliveLoops();
+      this.startTaskCleanupLoop();
     }, 1000);
   }
 
@@ -994,6 +1001,17 @@ export class LocalCloudController {
     };
   }
 
+  // 返回当前可见显示节点已有的全部分组（去重、排序），供前端分组筛选下拉框使用
+  @Get('esl-devices/groups')
+  deviceGroups(@Req() request: Request) {
+    const groups = new Set<string>();
+    for (const label of this.visibleDeviceLabels(request)) {
+      const group = stringValue(label.group);
+      if (group) groups.add(group);
+    }
+    return { items: [...groups].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN')) };
+  }
+
   @Post('esl-devices/batch-bind')
   async batchBindDevices(@Body() body: Row, @Req() request: Request) {
     const ids = this.bodyIds(body, 'deviceIds');
@@ -1090,6 +1108,7 @@ export class LocalCloudController {
       battery: 100,
       updatedAt: now(),
       deviceType: stringValue(body.deviceType, 'KERSEN_296_128'),
+      group: normalizeGroup(body.group),
     };
     this.db.labels.set(label.id, label);
     this.db.save();
@@ -1120,6 +1139,9 @@ export class LocalCloudController {
     }
     label.productId = stringValue(body.productId) || undefined;
     label.templateId = stringValue(body.templateId) || undefined;
+    if ('group' in body) {
+      label.group = normalizeGroup(body.group);
+    }
     label.updatedAt = now();
     if (label.id !== deviceId) {
       this.db.labels.delete(deviceId);
@@ -1504,6 +1526,14 @@ export class LocalCloudController {
       this.db.save();
     }
     return { ok: true, updatedCount, statuses: [...statuses] };
+  }
+
+  // 手动立即清理过期任务（管理员），不必等待定时器。
+  @Post('tasks/cleanup-expired')
+  cleanupExpiredTasks(@Req() request: Request) {
+    this.requireAdminUser(request);
+    const removed = this.purgeExpiredTasks();
+    return { ok: true, removed, retentionDays: Math.max(1, Number(process.env.ESL_TASK_RETENTION_DAYS ?? 3)) };
   }
 
   @Post('tasks/batch-refresh')
@@ -2789,6 +2819,47 @@ export class LocalCloudController {
         });
       }
     }, intervalMs);
+  }
+
+  // 定时清理超过 N 天（默认 3 天）的刷新任务，释放内存与数据库空间。
+  private startTaskCleanupLoop() {
+    if (this.taskCleanupTimer) return;
+    const enabled = readBool(process.env.ESL_TASK_CLEANUP_ENABLED, true);
+    if (!enabled) return;
+    const intervalMs = Math.max(600_000, Number(process.env.ESL_TASK_CLEANUP_INTERVAL_MS ?? 6 * 60 * 60 * 1000));
+    // 启动后延迟首次执行，避免与开机恢复逻辑争抢
+    setTimeout(() => this.purgeExpiredTasks(), Math.max(30_000, Number(process.env.ESL_TASK_CLEANUP_INITIAL_DELAY_MS ?? 120_000)));
+    this.taskCleanupTimer = setInterval(() => this.purgeExpiredTasks(), intervalMs);
+  }
+
+  private taskTimestampMs(task: Row): number | null {
+    const raw = stringValue(task.createdAt) || stringValue(task.triggeredAt) || stringValue(task.updatedAt);
+    if (!raw) return null;
+    const ts = new Date(raw).getTime();
+    return Number.isFinite(ts) ? ts : null;
+  }
+
+  private purgeExpiredTasks(): number {
+    const retentionDays = Math.max(1, Number(process.env.ESL_TASK_RETENTION_DAYS ?? 3));
+    const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+    let removed = 0;
+    for (const [taskId, task] of this.db.cloudTasks) {
+      const ts = this.taskTimestampMs(task as Row);
+      if (ts === null || ts >= cutoff) continue;
+      this.clearDeferredRefreshTimer(taskId);
+      this.db.cloudTasks.delete(taskId);
+      removed += 1;
+    }
+    if (removed > 0) {
+      this.db.save();
+      this.db.recordRequest({
+        method: 'TASK-CLEANUP',
+        path: '/tasks/auto-purge',
+        statusCode: 200,
+        body: { removed, retentionDays },
+      });
+    }
+    return removed;
   }
 
   private importDiscoveredLabelsForAp(ap: BaseStation & Row) {
@@ -4275,6 +4346,7 @@ export class LocalCloudController {
     const ownerUserId = stringValue(query.ownerUserId);
     const productId = stringValue(query.productId);
     const templateId = stringValue(query.templateId);
+    const group = stringValue(query.group);
     const keyword = stringValue(query.keyword).toLowerCase();
     return labels.filter((label) => {
       const ap = label.apId ? this.findAp(String(label.apId), false) : undefined;
@@ -4284,6 +4356,7 @@ export class LocalCloudController {
       if (apId && label.apId !== apId) return false;
       if (productId && String(label.productId ?? '') !== productId) return false;
       if (templateId && String(label.templateId ?? '') !== templateId) return false;
+      if (group && stringValue(label.group) !== group) return false;
       if (!keyword) return true;
       const haystack = [
         label.id,
@@ -4293,6 +4366,7 @@ export class LocalCloudController {
         label.sku,
         label.productId,
         label.templateId,
+        label.group,
         ap?.name,
         ap?.id,
       ].map((item) => stringValue(item).toLowerCase()).join(' ');
@@ -4355,6 +4429,7 @@ export class LocalCloudController {
       screenHeight: numberValue(label.screenHeight, numberValue(template?.height, preset.height)),
       battery: label.battery ?? 100,
       signal: label.rssi ?? 0,
+      group: stringValue(label.group) || undefined,
       bindStatus: label.productId || label.templateId ? 'bound' : 'unbound',
       status,
       lastRefreshAt: label.updatedAt,
@@ -4540,6 +4615,7 @@ export class LocalCloudController {
       screenHeight: numberValue(row.screenHeight, numberValue(template?.height, preset.height)),
       battery: label.battery ?? 100,
       signal: label.rssi ?? 0,
+      group: stringValue(row.group) || undefined,
       bindStatus: row.productId || row.templateId ? 'bound' : 'unbound',
       status,
       lastRefreshAt: label.updatedAt,

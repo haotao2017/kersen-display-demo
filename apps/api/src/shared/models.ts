@@ -63,6 +63,7 @@ export interface Label {
   rssi?: number;
   services?: Record<string, unknown>;
   connectivity?: Record<string, unknown>;
+  group?: string;
   updatedAt: string;
 }
 
