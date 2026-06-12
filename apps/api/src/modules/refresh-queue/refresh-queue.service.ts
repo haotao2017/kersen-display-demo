@@ -70,7 +70,18 @@ export class RefreshQueueService implements OnModuleDestroy {
     this.worker = new Worker<RefreshJobPayload>(
       'esl-refresh',
       async (job) => {
-        await this.waitForApSlot(job.data.apId, job.data.taskId);
+        const acquired = await this.waitForApSlot(job.data.apId, job.data.taskId);
+        if (!acquired) {
+          // 等不到该基站的槽位：把任务放回队尾延迟重试，立即释放工作线程，
+          // 避免单个基站（尤其是离线/卡顿的）占满全部并发、阻塞其他基站的任务。
+          const requeueDelayMs = Math.max(500, Math.min(60_000, Number(process.env.ESL_AP_REFRESH_SLOT_REQUEUE_DELAY_MS ?? 3_000)));
+          await this.queue?.add(
+            `refresh:${job.data.taskId}`,
+            job.data,
+            { delay: requeueDelayMs, jobId: `${job.data.taskId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}` },
+          );
+          return;
+        }
         let result: HandlerResult;
         let shouldHold = true;
         try {
@@ -163,11 +174,15 @@ export class RefreshQueueService implements OnModuleDestroy {
     this.localQueues.set(apId, state);
   }
 
-  private async waitForApSlot(apId: string, taskId: string) {
-    if (!this.connection || !apId) return;
+  // 返回 true 表示拿到槽位；超时拿不到返回 false（调用方应把任务放回队尾），
+  // 不再无限死等——死等会让一个基站的任务占住所有工作线程。
+  private async waitForApSlot(apId: string, taskId: string): Promise<boolean> {
+    if (!this.connection || !apId) return true;
     const limit = Math.max(1, Math.min(6, Number(process.env.ESL_AP_REFRESH_CONCURRENCY ?? 6)));
     const key = `esl:ap:${apId}:active-refresh`;
     const ttlMs = Math.max(10_000, Math.min(300_000, Number(process.env.ESL_AP_REFRESH_SLOT_TTL_MS ?? 120_000)));
+    const waitTimeoutMs = Math.max(2_000, Math.min(120_000, Number(process.env.ESL_AP_REFRESH_SLOT_WAIT_TIMEOUT_MS ?? 15_000)));
+    const deadline = Date.now() + waitTimeoutMs;
 
     while (true) {
       const acquired = await this.connection.eval(
@@ -188,7 +203,10 @@ return 0
       );
       if (acquired === 1) {
         await this.connection.pexpire(key, ttlMs);
-        return;
+        return true;
+      }
+      if (Date.now() >= deadline) {
+        return false;
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }

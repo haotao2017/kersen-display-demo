@@ -2047,6 +2047,21 @@ export class LocalCloudController {
       return;
     }
 
+    // 离线基站的任务不进入下发队列：留在待触发状态，由定时重试在基站恢复后再入队。
+    if (!this.isApDeliverable(apId)) {
+      const task = this.db.cloudTasks.get(taskId);
+      if (task) {
+        task.status = 'trigger_pending';
+        task.apId = apId;
+        task.resultMsg = `基站当前离线，任务暂不进入下发队列；系统会每 ${Math.round(REFRESH_DEFERRED_RETRY_DELAY_MS / 1000)} 秒重新检查，最多 ${REFRESH_DEFERRED_RETRY_MAX} 次。`;
+        task.updatedAt = now();
+        this.db.cloudTasks.set(taskId, task);
+        this.db.saveDeferred();
+        this.scheduleDeferredRefreshRetry(String(task.eslDeviceId ?? ''), taskId);
+      }
+      return;
+    }
+
     await this.refreshQueue.add({ apId, taskId });
   }
 
@@ -2149,6 +2164,20 @@ export class LocalCloudController {
       task.updatedAt = now();
       this.db.cloudTasks.set(String(task.id), task);
       this.db.saveDeferred();
+      return { ok: false };
+    }
+
+    // 基站离线时快速失败：对死基站做唤醒尝试只会白等超时（约 25 秒），
+    // 还会占满全局工作线程，把其他在线基站的任务堵在队列里。
+    if (!this.isApDeliverable(apId)) {
+      task.status = 'trigger_pending';
+      task.apId = apId;
+      task.resultMsg = `基站当前离线，刷新进入待触发；系统会每 ${Math.round(REFRESH_DEFERRED_RETRY_DELAY_MS / 1000)} 秒重新检查基站状态，最多 ${REFRESH_DEFERRED_RETRY_MAX} 次。`;
+      task.payload = { ...payload, preflightWakeRequired: true, apOffline: true, lastApOfflineAt: now() };
+      task.updatedAt = now();
+      this.db.cloudTasks.set(String(task.id), task);
+      this.db.saveDeferred();
+      this.scheduleDeferredRefreshRetry(label.id, String(task.id));
       return { ok: false };
     }
 
@@ -2716,11 +2745,15 @@ export class LocalCloudController {
       return;
     }
 
-    if (!this.isLabelScannedByAp(label, apId, LABEL_ONLINE_STABLE_MS)) {
+    // 基站离线时同样保持待触发并计数：避免对死基站的任务无限重试，也给用户明确的原因。
+    const apOffline = !this.isApDeliverable(apId);
+    if (apOffline || !this.isLabelScannedByAp(label, apId, LABEL_ONLINE_STABLE_MS)) {
       const nextAttempts = attempts + 1;
       task.status = 'trigger_pending';
       task.apId = apId;
-      task.resultMsg = `标签暂未被基站扫描确认，待触发第 ${nextAttempts}/${REFRESH_DEFERRED_RETRY_MAX} 次检查；系统将在 ${Math.round(REFRESH_DEFERRED_RETRY_DELAY_MS / 1000)} 秒后继续尝试。`;
+      task.resultMsg = apOffline
+        ? `基站当前离线，待触发第 ${nextAttempts}/${REFRESH_DEFERRED_RETRY_MAX} 次检查；系统将在 ${Math.round(REFRESH_DEFERRED_RETRY_DELAY_MS / 1000)} 秒后继续尝试。`
+        : `标签暂未被基站扫描确认，待触发第 ${nextAttempts}/${REFRESH_DEFERRED_RETRY_MAX} 次检查；系统将在 ${Math.round(REFRESH_DEFERRED_RETRY_DELAY_MS / 1000)} 秒后继续尝试。`;
       task.payload = {
         ...payload,
         retryInFlight: false,
@@ -3784,6 +3817,15 @@ export class LocalCloudController {
 
     const online = uniqueCandidates.find((apId) => this.db.baseStations.get(apId)?.status === 'online');
     return online ?? uniqueCandidates[0];
+  }
+
+  // 基站是否处于可下发状态（websocket 已连接或心跳在线）。
+  // 离线基站的任务不允许占用下发队列工作线程，否则会阻塞其他在线基站的任务。
+  private isApDeliverable(apId: string | undefined | null): boolean {
+    if (!apId) return false;
+    if (this.apWebsocket.getConnectionStatus(apId).connected) return true;
+    const ap = this.db.baseStations.get(apId);
+    return Boolean(ap && String(ap.status) === 'online');
   }
 
   private templatePreviewUrl(templateId: string) {
