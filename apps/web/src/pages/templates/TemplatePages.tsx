@@ -13,6 +13,7 @@ import { useI18n } from '../../i18n';
 import type { TemplateElement, TemplateSchema } from '../../types/domain';
 import { API_BASE_URL, queryKeys } from '../../utils/constants';
 import { generateId } from '../../utils/id';
+import { copyText } from '../../utils/clipboard';
 
 const SAMPLE_IMAGE_URL = 'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=640&q=80';
 const ESL_SCREEN_PRESETS = [
@@ -989,9 +990,13 @@ export const TemplateListPage = () => {
                 <Space>
                   <Button
                     icon={<CopyOutlined />}
-                    onClick={() => {
-                      navigator.clipboard.writeText(row.id);
-                      modal.success({ title: tx('ID 已复制', 'ID copied'), content: row.id, width: 480 });
+                    onClick={async () => {
+                      const ok = await copyText(row.id);
+                      if (ok) {
+                        modal.success({ title: tx('ID 已复制', 'ID copied'), content: row.id, width: 480 });
+                      } else {
+                        modal.error({ title: tx('复制失败，请手动复制', 'Copy failed, please copy manually'), content: row.id, width: 480 });
+                      }
                     }}
                   >
                     {tx('复制 ID', 'Copy ID')}

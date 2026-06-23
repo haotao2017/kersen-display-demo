@@ -10,6 +10,7 @@ import { useAppStore } from '../../app/store';
 import { PageHeaderCard } from '../../components/common/PageHeaderCard';
 import { useI18n } from '../../i18n';
 import { queryKeys } from '../../utils/constants';
+import { copyText } from '../../utils/clipboard';
 
 type ProductFieldConfig = {
   key: string;
@@ -295,9 +296,13 @@ export const ProductListPage = () => {
                 <Space>
                   <Button
                     icon={<CopyOutlined />}
-                    onClick={() => {
-                      navigator.clipboard.writeText(row.id);
-                      message.success(tx('ID 已复制', 'ID copied'));
+                    onClick={async () => {
+                      const ok = await copyText(row.id);
+                      if (ok) {
+                        message.success(tx('ID 已复制', 'ID copied'));
+                      } else {
+                        message.error(tx('复制失败，请手动复制', 'Copy failed, please copy manually'));
+                      }
                     }}
                   >
                     {tx('复制 ID', 'Copy ID')}
