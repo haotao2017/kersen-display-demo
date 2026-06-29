@@ -37,6 +37,7 @@ export const api = {
   updateStore: (code: string, payload: Pick<Store, 'code' | 'name'> & { address?: string }) => http.put<Store>(`/stores/${code}`, payload),
   deleteStore: (code: string) => http.delete<{ deleted: boolean; code: string }>(`/stores/${code}`),
   products: (params?: Record<string, unknown>) => http.get<Paginated<Product>>('/products', { params }),
+  productGroups: () => http.get<{ items: string[] }>('/products/groups'),
   product: (id: string) => http.get<Product & { defaultTemplate?: Template | null; boundDevices?: EslDevice[] }>(`/products/${id}`),
   productDevices: (id: string, params?: Record<string, unknown>) => http.get<Paginated<EslDevice>>('/esl-devices', { params: { ...params, productId: id } }),
   createProduct: (payload: Partial<Product>) => http.post<Product>('/products', payload),

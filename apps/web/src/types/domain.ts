@@ -84,6 +84,7 @@ export interface Product {
   promotionText?: string;
   imageUrl?: string;
   customFields?: Record<string, string>;
+  group?: string;
   defaultTemplateId?: string;
   defaultTemplate?: Template | null;
   bindDeviceCount?: number;

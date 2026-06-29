@@ -29,7 +29,7 @@ export const EslDeviceListPage = () => {
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<{
-    success: number; failed: number;
+    success: number; failed: number; refreshed: number;
     errors: Array<{ row: number; eslCode: string; reason: string }>;
   } | null>(null);
   const [filters, setFilters] = useState<{ storeCode?: string; apId?: string; keyword?: string; ownerUserId?: string; group?: string }>({});
@@ -269,7 +269,7 @@ export const EslDeviceListPage = () => {
       const tmplById  = new Map<string, any>((tmplData.items  ?? []).map((t: any) => [String(t.id ?? '').trim(), t]));
       const devByCode = new Map<string, any>((devsData.items  ?? []).map((d: any) => [String(d.eslCode ?? '').toLowerCase().trim(), d]));
 
-      let success = 0, failed = 0;
+      let success = 0, failed = 0, refreshed = 0;
       const errors: Array<{ row: number; eslCode: string; reason: string }> = [];
 
       for (let i = 0; i < rawRows.length; i++) {
@@ -317,8 +317,13 @@ export const EslDeviceListPage = () => {
           const template = tmplId ? tmplById.get(tmplId) ?? null : null;
 
           if (product) {
-            // autoRefresh: false — import never triggers a label push
-            await api.bindDevice(deviceId, { productId: product.id, templateId: template?.id, autoRefresh: false });
+            // 绑定数据齐全且有效时（商品存在且为 active、且有可用模板），导入即生成刷新任务，
+            // 无论是更新已有价签还是新增价签都会下发；否则只建立绑定关系、不下发。
+            const effectiveTemplateId = template?.id ?? product.defaultTemplateId ?? undefined;
+            const productActive = product.status === 'active' || String(product.status) === '1';
+            const shouldRefresh = Boolean(effectiveTemplateId) && productActive;
+            await api.bindDevice(deviceId, { productId: product.id, templateId: template?.id, autoRefresh: shouldRefresh });
+            if (shouldRefresh) refreshed++;
           }
 
           success++;
@@ -329,7 +334,8 @@ export const EslDeviceListPage = () => {
       }
 
       queryClient.invalidateQueries({ queryKey: queryKeys.devices });
-      setImportResult({ success, failed, errors });
+      queryClient.invalidateQueries({ queryKey: queryKeys.tasks });
+      setImportResult({ success, failed, refreshed, errors });
     } catch (e: any) {
       message.error(tx('导入失败', 'Import failed') + ': ' + e.message);
     } finally {
@@ -670,6 +676,14 @@ export const EslDeviceListPage = () => {
                 {tx(`${importResult.success} 条成功，${importResult.failed} 条失败`, `${importResult.success} succeeded, ${importResult.failed} failed`)}
               </Typography.Text>
             )}
+            <div style={{ marginTop: 8 }}>
+              <Typography.Text type="secondary">
+                {tx(
+                  `其中 ${importResult.refreshed} 个价签绑定数据齐全有效，已生成刷新任务并下发；可在任务中心查看进度。`,
+                  `${importResult.refreshed} label(s) had complete & valid bindings and were queued for refresh; track progress in Tasks.`,
+                )}
+              </Typography.Text>
+            </div>
             {importResult.errors.length > 0 && (
               <Table
                 style={{ marginTop: 12 }}

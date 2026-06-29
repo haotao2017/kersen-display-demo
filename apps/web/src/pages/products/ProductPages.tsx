@@ -25,6 +25,7 @@ const BASE_PRODUCT_FIELDS: ProductFieldConfig[] = [
   { key: 'name', name: 'name', labelZh: '名称 (#name)', labelEn: 'Name (#name)', type: 'input', required: true },
   { key: 'sku', name: 'sku', labelZh: '来源编号 (#sourceId)', labelEn: 'Source ID (#sourceId)', type: 'input', required: true },
   { key: 'status', name: 'status', labelZh: '状态', labelEn: 'Status', type: 'select' },
+  { key: 'group', name: 'group', labelZh: '分组', labelEn: 'Group', type: 'input' },
   { key: 'barcode', name: 'barcode', labelZh: '参考值 (#reference)', labelEn: 'Reference (#reference)', type: 'input' },
   { key: 'price', name: 'price', labelZh: '字段 1 (#field1)', labelEn: 'Field 1 (#field1)', type: 'number' },
   { key: 'promotionPrice', name: 'promotionPrice', labelZh: '字段 2 (#field2)', labelEn: 'Field 2 (#field2)', type: 'number' },
@@ -48,7 +49,7 @@ const CUSTOM_PRODUCT_FIELDS: ProductFieldConfig[] = Array.from({ length: 22 }, (
 }));
 
 const PRODUCT_FIELDS = [...BASE_PRODUCT_FIELDS, ...CUSTOM_PRODUCT_FIELDS];
-const DEFAULT_CREATE_VISIBLE_FIELDS = ['name', 'sku', 'status'];
+const DEFAULT_CREATE_VISIBLE_FIELDS = ['name', 'sku', 'status', 'group'];
 
 const hasFieldValue = (value: unknown) => {
   if (value === null || value === undefined) return false;
@@ -92,7 +93,7 @@ export const ProductListPage = () => {
   const queryClient = useQueryClient();
   const currentUser = useAppStore((state) => state.user);
   const isAdmin = currentUser?.role === 'ADMIN';
-  const [filters, setFilters] = useState<{ ownerUserId?: string; keyword?: string }>({});
+  const [filters, setFilters] = useState<{ ownerUserId?: string; keyword?: string; group?: string }>({});
   const [pagination, setPagination] = useState({ current: 1, pageSize: DEFAULT_PAGE_SIZE });
   const [sortField, setSortField] = useState<string>('updatedAt');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
@@ -109,7 +110,9 @@ export const ProductListPage = () => {
     placeholderData: (previous) => previous,
   });
   const { data: users } = useQuery({ queryKey: queryKeys.users, queryFn: () => api.users({ pageSize: 200 }), enabled: isAdmin });
+  const { data: groups } = useQuery({ queryKey: [...queryKeys.products, 'groups'], queryFn: () => api.productGroups(), refetchInterval: 60_000 });
   const userOptions = useMemo(() => (users?.items ?? []).map((user) => ({ label: `${user.displayName || user.username} / ${user.username}`, value: user.id })), [users]);
+  const groupOptions = useMemo(() => (groups?.items ?? []).map((g) => ({ label: g, value: g })), [groups]);
   const refresh = useMutation({
     mutationFn: api.refreshProduct,
     onSuccess: (result: ProductRefreshResult) => {
@@ -220,6 +223,17 @@ export const ProductListPage = () => {
               style={{ width: 280 }}
               onSearch={(keyword) => updateFilters({ keyword: keyword.trim() || undefined })}
             />
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder={tx('按分组筛选', 'Filter by group')}
+              style={{ width: 220 }}
+              options={groupOptions}
+              value={filters.group}
+              onChange={(group) => updateFilters({ group })}
+              notFoundContent={tx('暂无分组', 'No groups yet')}
+            />
           </Space>
           {selectedRowKeys.length > 0 && (
             <Button
@@ -267,6 +281,11 @@ export const ProductListPage = () => {
             { title: tx('名称', 'Name'), dataIndex: 'name' },
             { title: tx('来源编号', 'Source ID'), dataIndex: 'sku' },
             { title: tx('参考值', 'Reference'), dataIndex: 'barcode' },
+            {
+              title: tx('分组', 'Group'),
+              dataIndex: 'group',
+              render: (_, row: any) => (row.group ? <Tag color="blue">{row.group}</Tag> : <Typography.Text type="secondary">-</Typography.Text>),
+            },
             { title: tx('字段 1', 'Field 1'), dataIndex: 'price' },
             { title: tx('字段 2', 'Field 2'), dataIndex: 'promotionPrice' },
             { title: tx('模板', 'Template'), render: (_, row: any) => row.defaultTemplate?.name ?? '-' },

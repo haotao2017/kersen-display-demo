@@ -119,7 +119,7 @@ const SCREEN_PRESETS: ScreenPreset[] = [
   { key: '176002f7', width: 400, height: 300, service: '01-00-00-03', magic: 0x04, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 0, mirrorX: false, mode: '03-04 400x300#b0y2r3w1' },
   { key: '17500175', width: 240, height: 416, service: '01-00-00-03', magic: 0x04, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 90, mirrorX: true, mode: '03-04 240x416#b0y2r3w1' },
   { key: '174004d2', width: 184, height: 384, service: '01-00-00-03', magic: 0x03, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 90, mirrorX: false, mode: '03-03 184x384#b0y2r3w1' },
-  { key: '17200227', width: 152, height: 296, service: '01-00-00-03', magic: 0x02, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 90, mirrorX: true, mode: '03-02 152x296#b0y2r3w1' },
+  { key: '17200227', width: 152, height: 296, service: '01-00-00-03', magic: 0x02, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 270, mirrorX: true, mode: '03-02 152x296#b0y2r3w1' },
   { key: '173014d6', width: 128, height: 296, service: '01-00-00-03', magic: 0x02, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 90, mirrorX: true, mode: '03-02 128x296#b0y2r3w1' },
   { key: '1700009f', width: 200, height: 200, service: '01-00-00-03', magic: 0x02, bpp: 2, colorMode: 'bwry', packing: '2bpp', rotate: 90, mirrorX: false, mode: '03-02 200x200#b0y2r3w1' },
   { key: '14371296', width: 128, height: 250, service: '01-00-00-03', magic: 0x01, bpp: 1, colorMode: 'bwr', packing: 'bwr_planes', rotate: 90, mirrorX: false, mode: '03-01 128x250#bwrplanes' },
@@ -712,7 +712,9 @@ export class LocalCloudController {
 
   @Get('products')
   products(@Query() query: Row, @Req() request: Request) {
-    const items = this.filterRowsByOwnerAndKeyword(this.localProducts(request), query, ['name', 'sku', 'barcode', 'status']);
+    const group = stringValue(query.group);
+    const items = this.filterRowsByOwnerAndKeyword(this.localProducts(request), query, ['name', 'sku', 'barcode', 'status'])
+      .filter((item: any) => !group || stringValue(item.group) === group);
     const sortBy  = stringValue(query.sortBy,    'updatedAt');
     const sortDir = stringValue(query.sortOrder, 'desc');
     items.sort((a: any, b: any) => {
@@ -721,6 +723,17 @@ export class LocalCloudController {
       return sortDir === 'desc' ? bv.localeCompare(av) : av.localeCompare(bv);
     });
     return paginate(items, query);
+  }
+
+  // 返回当前可见数据源已有的全部分组（去重、排序），供前端分组筛选下拉框使用
+  @Get('products/groups')
+  productGroups(@Req() request: Request) {
+    const groups = new Set<string>();
+    for (const product of this.localProducts(request)) {
+      const group = stringValue((product as any).group);
+      if (group) groups.add(group);
+    }
+    return { items: [...groups].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN')) };
   }
 
   @Post('products')
@@ -1782,6 +1795,7 @@ export class LocalCloudController {
       promotionText: input.promotionText,
       imageUrl: input.imageUrl,
       customFields: input.customFields ?? {},
+      group: stringValue(input.group),
       defaultTemplateId: input.defaultTemplateId,
       status: normalizeProductStatus(input.status),
       ownerUserId: input.ownerUserId,
