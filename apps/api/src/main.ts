@@ -16,6 +16,20 @@ function isLoopback(ip?: string) {
   return !ip || ip === '::1' || ip === '127.0.0.1' || ip === '::ffff:127.0.0.1';
 }
 
+const SENSITIVE_BODY_KEYS = new Set(['password', 'newpassword', 'oldpassword', 'refreshtoken', 'accesstoken', 'token']);
+
+function redactSensitiveBody(body: unknown): unknown {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return body;
+  }
+  return Object.fromEntries(
+    Object.entries(body as Record<string, unknown>).map(([key, value]) => [
+      key,
+      SENSITIVE_BODY_KEYS.has(key.toLowerCase()) ? '[REDACTED]' : value,
+    ]),
+  );
+}
+
 function isConsoleNoise(path: string, ip?: string, userAgent?: string | string[]) {
   const ua = Array.isArray(userAgent) ? userAgent.join(' ') : (userAgent ?? '');
   if (!isLoopback(ip) || !ua.includes('Mozilla')) {
@@ -82,7 +96,7 @@ async function bootstrap() {
         ip: req.ip,
         userAgent: req.headers['user-agent'],
         query: req.query,
-        body: req.body,
+        body: redactSensitiveBody(req.body),
       });
 
       if (Date.now() - startedAt > 1000) {

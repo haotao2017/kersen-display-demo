@@ -1,9 +1,10 @@
 import { App, Button, Card, Form, Input, Typography } from 'antd';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../../api';
 import { useAppStore } from '../../app/store';
+import { setAuthTokens } from '../../services/auth-storage';
 import { useI18n } from '../../i18n';
 import brandLogo from '../../images/logo/logo.jpg';
 
@@ -11,6 +12,7 @@ export const LoginPage = () => {
   const { message } = App.useApp();
   const { tx } = useI18n();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const setUser = useAppStore((state) => state.setUser);
 
   useEffect(() => {
@@ -23,8 +25,9 @@ export const LoginPage = () => {
   const mutation = useMutation({
     mutationFn: api.login,
     onSuccess: (data) => {
-      localStorage.setItem('accessToken', data.accessToken);
-      localStorage.setItem('refreshToken', data.refreshToken);
+      // Discard any data cached by a previous account before switching user.
+      queryClient.clear();
+      setAuthTokens(data.accessToken, data.refreshToken);
       setUser(data.user);
       message.success(tx('登录成功', 'Login successful'));
       navigate('/dashboard');
@@ -50,7 +53,7 @@ export const LoginPage = () => {
         <Typography.Paragraph type="secondary" style={{ textAlign: 'center', marginBottom: 24 }}>
           {tx('无线显示管理', 'Wireless display management')}
         </Typography.Paragraph>
-        <Form layout="vertical" initialValues={{ username: 'admin', password: '123456' }} onFinish={(values) => mutation.mutate(values)}>
+        <Form layout="vertical" onFinish={(values) => mutation.mutate(values)}>
           <Form.Item name="username" label={tx('用户名', 'Username')} rules={[{ required: true }]}>
             <Input />
           </Form.Item>

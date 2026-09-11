@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
 import { useAppStore } from '../../app/store';
+import { setAuthTokens } from '../../services/auth-storage';
 import { useI18n } from '../../i18n';
 
 export const RegisterPage = () => {
@@ -33,8 +34,7 @@ export const RegisterPage = () => {
   const mutation = useMutation({
     mutationFn: api.register,
     onSuccess: (data: any) => {
-      localStorage.setItem('accessToken', data.accessToken);
-      localStorage.setItem('refreshToken', data.refreshToken);
+      setAuthTokens(data.accessToken, data.refreshToken);
       setUser(data.user);
       message.success(tx('注册成功，已自动登录', 'Registration successful. Signed in automatically.'));
       navigate('/dashboard');

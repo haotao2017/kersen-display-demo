@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, NotFoundException, Param, Post, Put, Query, Req, Res, Sse, StreamableFile, UnauthorizedException, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, NotFoundException, Param, Post, Put, Query, Req, Res, Sse, StreamableFile, UnauthorizedException, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
@@ -18,6 +18,8 @@ import { ApWebsocketService } from '../ap-websocket/ap-websocket.service';
 import { LabelRendererService } from '../labels/label-renderer.service';
 import { MqttService } from '../mqtt/mqtt.service';
 import { RefreshQueueService } from '../refresh-queue/refresh-queue.service';
+import { AuthenticatedRequest, LocalCloudAuthGuard } from './local-cloud-auth.guard';
+import { Public } from './public.decorator';
 
 type Row = Record<string, unknown>;
 type UserRole = 'ADMIN' | 'OPERATOR' | 'VIEWER';
@@ -462,6 +464,7 @@ function resizeSchemaToCanvas(schema: Row, width: number, height: number, device
 }
 
 @Controller('api/v1')
+@UseGuards(LocalCloudAuthGuard)
 export class LocalCloudController {
   private readonly refreshWindowUntilByAp = new Map<string, number>();
   private readonly labelKeepaliveCursorByAp = new Map<string, number>();
@@ -491,6 +494,7 @@ export class LocalCloudController {
     }, 1000);
   }
 
+  @Public()
   @Post('auth/login')
   login(@Body() body: Row) {
     const storeCode = stringValue(body.storeCode, process.env.UPSTREAM_STORE_CODE ?? '20248517');
@@ -515,6 +519,7 @@ export class LocalCloudController {
     };
   }
 
+  @Public()
   @Get('auth/invites/:token')
   inviteDetail(@Param('token') token: string) {
     const invite = this.findInviteByToken(token);
@@ -522,6 +527,7 @@ export class LocalCloudController {
     return this.publicInvite(invite);
   }
 
+  @Public()
   @Post('auth/register')
   register(@Body() body: Row) {
     const token = stringValue(body.token);
@@ -566,6 +572,7 @@ export class LocalCloudController {
     };
   }
 
+  @Public()
   @Post('auth/refresh')
   refresh(@Body() body: Row) {
     const refreshToken = stringValue(body.refreshToken);
@@ -578,10 +585,16 @@ export class LocalCloudController {
     } catch {
       throw new UnauthorizedException('Invalid refresh token');
     }
+    if (decoded.type !== 'refresh') {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
     const userId = stringValue(decoded.sub);
     const user = userId ? this.db.users.get(userId) : undefined;
     if (!user) {
       throw new UnauthorizedException('Invalid refresh token');
+    }
+    if (String(user.status ?? 'active') === 'disabled') {
+      throw new UnauthorizedException('User is disabled');
     }
     const store = this.db.stores.get(String(user.storeCode ?? '')) ?? [...this.db.stores.values()][0];
     return {
@@ -591,6 +604,7 @@ export class LocalCloudController {
     };
   }
 
+  @Public()
   @Sse('events/stream')
   eventStream() {
     return new Observable<{ type: string; data: Row }>((subscriber) => {
@@ -602,6 +616,7 @@ export class LocalCloudController {
     });
   }
 
+  @Public()
   @Post('auth/logout')
   logout() {
     return true;
@@ -899,9 +914,10 @@ export class LocalCloudController {
     return { schema: template.schema };
   }
 
+  @Public()
   @Get('templates/:templateId/preview-image')
-  async templatePreviewImage(@Param('templateId') templateId: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
-    const template = this.assertRowVisible(this.findTemplate(templateId), request, 'Template not found');
+  async templatePreviewImage(@Param('templateId') templateId: string, @Res({ passthrough: true }) response: Response) {
+    const template = this.findTemplate(templateId);
     const render = await this.renderTemplateForLabel(this.labelFromProduct({
       id: 'preview',
       sku: 'PREVIEW',
@@ -1232,10 +1248,11 @@ export class LocalCloudController {
   }
 
   @Post('labels/silent-wake')
-  async silentWakeLabels(@Body() body: Row) {
-    const labelIds = Array.isArray(body.labelIds)
+  async silentWakeLabels(@Body() body: Row, @Req() request: Request) {
+    const requestedIds = Array.isArray(body.labelIds)
       ? body.labelIds.map((item) => stringValue(item).toLowerCase()).filter(Boolean)
       : [stringValue(body.labelId).toLowerCase()].filter(Boolean);
+    const labelIds = requestedIds.filter((labelId) => this.canAccessRow(this.db.labels.get(labelId) as (Label & Row) | undefined, request));
     return this.runSilentWake(labelIds, {
       apId: stringValue(body.apId) || undefined,
       waitMs: numberValue(body.waitMs, 8000),
@@ -1766,6 +1783,7 @@ export class LocalCloudController {
     };
   }
 
+  @Public()
   @Get('uploads/files/:filename')
   async uploadedFile(@Param('filename') filename: string, @Res({ passthrough: true }) response: Response) {
     if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
@@ -4047,13 +4065,26 @@ export class LocalCloudController {
     });
   }
 
+  /**
+   * Resolves the acting user. With an HTTP request this is strictly the user
+   * verified by LocalCloudAuthGuard; a request without one is rejected instead
+   * of silently falling back to admin. Without a request (background jobs,
+   * device callbacks) the built-in admin acts as the system user.
+   */
   private currentUser(request?: Request) {
     this.ensureAdminUser();
-    const auth = request?.headers?.authorization ?? '';
-    const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-    const decoded = token ? this.jwt.decode(token) as Row | null : null;
-    const userId = stringValue(decoded?.sub);
-    return (userId ? this.db.users.get(userId) : undefined) ?? this.ensureAdminUser();
+    if (!request) {
+      return this.ensureAdminUser();
+    }
+    const user = (request as AuthenticatedRequest).user;
+    if (!user) {
+      throw new UnauthorizedException('Authentication required');
+    }
+    const fresh = this.db.users.get(String(user.id ?? ''));
+    if (!fresh || String(fresh.status ?? 'active') === 'disabled') {
+      throw new UnauthorizedException('User is disabled');
+    }
+    return fresh;
   }
 
   private requireAdminUser(request?: Request) {

@@ -1,5 +1,5 @@
 import { DesktopOutlined, DeploymentUnitOutlined, HomeOutlined, InboxOutlined, SettingOutlined, ShopOutlined, ShoppingOutlined, TagsOutlined, UserOutlined } from '@ant-design/icons';
-import { App, Badge, Button, Layout, Menu, Select, Space, Tag, Typography } from 'antd';
+import { App, Badge, Button, Layout, Menu, Select, Space, Spin, Tag, Typography } from 'antd';
 import { Link, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useEffect } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -8,6 +8,7 @@ import { queryKeys } from '../utils/constants';
 import { useAppStore } from '../app/store';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useI18n } from '../i18n';
+import { clearAuthTokens, getAccessToken, getRefreshToken } from '../services/auth-storage';
 import brandLogo from '../images/logo/logo_line.png';
 
 const { Header, Sider, Content } = Layout;
@@ -21,7 +22,7 @@ export const MainLayout = () => {
   const setUser = useAppStore((state) => state.setUser);
   const wsConnected = useAppStore((state) => state.wsConnected);
   useWebSocket();
-  const hasToken = Boolean(localStorage.getItem('accessToken'));
+  const hasToken = Boolean(getAccessToken());
   const { data, isError, isFetched } = useQuery({
     queryKey: queryKeys.me,
     queryFn: api.me,
@@ -29,6 +30,7 @@ export const MainLayout = () => {
     retry: false,
   });
   const isAuthFailed = hasToken && !user && isFetched && isError;
+  const isResolvingUser = hasToken && !user && !isAuthFailed;
 
   useEffect(() => {
     if (data) setUser(data);
@@ -41,10 +43,9 @@ export const MainLayout = () => {
   }, [hasToken, setUser]);
 
   const logout = useMutation({
-    mutationFn: () => api.logout({ refreshToken: localStorage.getItem('refreshToken') ?? '' }),
+    mutationFn: () => api.logout({ refreshToken: getRefreshToken() ?? '' }),
     onSettled: async () => {
-      localStorage.removeItem('accessToken');
-      localStorage.removeItem('refreshToken');
+      clearAuthTokens();
       setUser(null);
       await queryClient.clear();
       message.success(tx('已退出登录', 'Signed out'));
@@ -65,10 +66,17 @@ export const MainLayout = () => {
 
   if (!hasToken || isAuthFailed) {
     if (isAuthFailed) {
-      localStorage.removeItem('accessToken');
-      localStorage.removeItem('refreshToken');
+      clearAuthTokens();
     }
     return <Navigate to="/login" replace />;
+  }
+
+  if (isResolvingUser) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
+        <Spin size="large" />
+      </div>
+    );
   }
 
   return (

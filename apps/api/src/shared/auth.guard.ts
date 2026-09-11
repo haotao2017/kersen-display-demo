@@ -13,11 +13,16 @@ export class AuthGuard implements CanActivate {
       throw new UnauthorizedException('Missing bearer token');
     }
 
+    let payload: Record<string, unknown>;
     try {
-      request.user = this.jwt.verify(token);
-      return true;
+      payload = this.jwt.verify<Record<string, unknown>>(token);
     } catch {
       throw new UnauthorizedException('Invalid bearer token');
     }
+    if (payload.type === 'refresh') {
+      throw new UnauthorizedException('Refresh token cannot be used as access token');
+    }
+    request.user = payload;
+    return true;
   }
 }

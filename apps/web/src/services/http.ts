@@ -2,6 +2,7 @@ import axios from 'axios';
 import type { AxiosRequestConfig, InternalAxiosRequestConfig } from 'axios';
 import { API_BASE_URL } from '../utils/constants';
 import { useAppStore } from '../app/store';
+import { clearAuthTokens, getAccessToken, getRefreshToken, setAuthTokens } from './auth-storage';
 
 const instance = axios.create({
   baseURL: API_BASE_URL,
@@ -24,8 +25,7 @@ export const extractApiErrorMessage = (error: unknown) => {
 let refreshPromise: Promise<string | null> | null = null;
 
 const clearAuth = () => {
-  localStorage.removeItem('accessToken');
-  localStorage.removeItem('refreshToken');
+  clearAuthTokens();
   useAppStore.getState().setUser(null);
 };
 
@@ -38,18 +38,17 @@ const redirectToLogin = (reason: string) => {
 };
 
 const refreshAccessToken = async () => {
-  const refreshToken = localStorage.getItem('refreshToken');
+  const refreshToken = getRefreshToken();
   if (!refreshToken) return null;
   const response = await axios.post(`${API_BASE_URL}/auth/refresh`, { refreshToken });
   const data = response.data?.data;
   if (!data?.accessToken || !data?.refreshToken) return null;
-  localStorage.setItem('accessToken', data.accessToken);
-  localStorage.setItem('refreshToken', data.refreshToken);
+  setAuthTokens(data.accessToken, data.refreshToken);
   return data.accessToken as string;
 };
 
 instance.interceptors.request.use((config) => {
-  const token = localStorage.getItem('accessToken');
+  const token = getAccessToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
